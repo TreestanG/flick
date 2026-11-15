@@ -4,6 +4,8 @@ Part 4 of 4. What happens when a gesture fires: how the user's plain-language re
 
 Related files: `01-desktop-app-ui.md`, `02-webcam-tracking.md`, `03-gesture-agent-and-detection.md`.
 
+Everything in this file runs in the engine: a headless Python process that keeps running with no UI window open. The UI is a separate Tauri app (file 01) that connects over a local WebSocket. Actions fire whether or not a window is open.
+
 ## Goals
 
 - The user says what should happen in a sentence, and the agent maps it to an action.
@@ -70,7 +72,8 @@ Key presses use `pyautogui` with its delays turned off for speed. macOS needs Ac
 
 ## Chrome connection
 
-- A small Chrome extension connects to a local WebSocket server run by the app (`localhost` only, with a shared token).
+- A small Chrome extension connects to a local WebSocket server run by the engine (`localhost` only, with a shared token).
+- This is separate from the UI's connection (file 01): its own path (`/chrome`), its own token, and its own fixed list of messages. A UI token does not work here, and the other way round.
 - The extension runs Chrome API calls directly, such as `chrome.tabs.remove`, `chrome.tabs.create` and `chrome.windows.update` with `minimized`.
 - It works even when Chrome is not the focused window and does not depend on keyboard shortcuts.
 - The user installs the extension once and clicks Connect Chrome in settings.
@@ -85,7 +88,7 @@ The user can paste in their own script instead of using a built-in action.
 - A script box for the code, and a language choice (for example Python, or the system shell: PowerShell on Windows, a shell script on macOS and Linux).
 - A **working directory** field, with a clear line under it:
   *"When this gesture runs, this script runs in `<folder>`. You can change this folder."*
-- A **Choose folder** button.
+- A **Choose folder** button, which opens the OS folder picker through Tauri.
 - A **Run now** button to test it.
 - The app shows exactly what will run and where, and asks the user to confirm before saving.
 
@@ -95,7 +98,7 @@ The user can paste in their own script instead of using a built-in action.
 - It runs in the background and never blocks tracking. A timeout applies (default 30 seconds, adjustable).
 - If the previous run of the same script is still going, skip the new one (a setting).
 - The app passes information through environment variables: `GESTURE_NAME`, `GESTURE_ID`, and a timestamp.
-- Output and errors go to a log the user can open from the gesture's page. A failure also shows a short message in the main window.
+- Output and errors go to a log the user can open from the gesture's page. A failure also shows a short message in the main window, if one is open. With no window open, the log is the record.
 - Scripts are saved as files and not passed through a shell string, so gesture names and other text cannot inject commands.
 
 ## Safety
@@ -140,7 +143,7 @@ In `gestures.json`:
 ## Test and failure handling
 
 - Every gesture has a **Test action** button that runs the action without the gesture.
-- Each run reports back to the UI as `action_result` with ok or an error message.
+- Each run reports back as an `action_result` event with ok or an error message. It reaches any connected window and is always written to the engine's log.
 - If Chrome is not connected, say so in the message instead of failing silently.
 
 ## Build order
@@ -156,4 +159,6 @@ In `gestures.json`:
 - Which script languages to support first.
 - On Windows, whether PowerShell execution policy will block scripts and how to handle it.
 - Whether other connected tools beyond Chrome (for example apps with their own plugins) should become action providers later. The catalog and runner are structured so a new provider can be added.
+- Whether a failed action should show on the tray icon or as an OS notification when no window is open.
+- Whether the Chrome bridge and the UI socket share one port (two paths) or use two ports.
 - Whether browsers other than Chrome should be supported (Edge and Brave also take the same extension).

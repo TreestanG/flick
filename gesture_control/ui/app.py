@@ -18,7 +18,7 @@ from .main_view import MainView
 from .new_command import NewCommandDialog
 from .settings_view import SettingsView
 from .theme import ACCENT_TEXT, BORDER, HOVER, INSET, MUTED, RADIUS, SURFACE, TEXT
-from .widgets import Chip, ConfirmDialog, PopupMenu, clear, label, separator
+from .widgets import Chip, ConfirmDialog, PopupMenu, Scroll, clear, label, separator
 
 PUMP_MS = 33   # events are read every tick, the preview is drawn every second tick (~15 fps)
 
@@ -59,6 +59,7 @@ class App(ctk.CTk):
         self._pending_match: str | None = None
         self._tick = 0
         self._ui_queue: queue.Queue = queue.Queue()
+        self._checklist: dict | None = None
 
         self._build_rail()
         separator(self, vertical=True).pack(side="left", fill="y")
@@ -225,7 +226,11 @@ class App(ctk.CTk):
                 "key": self.has_key, "chrome": self.chrome_connected}
 
     def state_changed(self) -> None:
-        if getattr(self, "first_run", None) is not None:
+        if getattr(self, "first_run", None) is None:
+            return
+        now = self.checklist()          # called four times a second; redraw on change only
+        if now != self._checklist:
+            self._checklist = now
             self.first_run.refresh()
 
     def save_settings(self) -> None:
@@ -295,7 +300,8 @@ class App(ctk.CTk):
                 return
         if self._tick % 2 == 0:
             frame = self.bus.preview.take()
-            if frame is not None and self.page == "main" and self.winfo_viewable():
+            if frame is not None and self.page == "main" and self.winfo_viewable() \
+                    and not Scroll.busy():      # the camera image waits while the page glides
                 self.main.render_preview(frame)
         self.after(PUMP_MS, self._pump)
 

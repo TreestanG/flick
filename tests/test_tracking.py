@@ -159,7 +159,7 @@ def test_settings_apply():
     seg = Segmenter(dict(DETECTION_DEFAULTS, start_speed=50))
     assert not [s for s in map(seg.update, stream(swipe())) if s]
     seg.configure(DETECTION_DEFAULTS)
-    assert seg.start_speed == 1.2 and seg.quiet_s == 0.15
+    assert seg.start_speed == 0.5 and seg.quiet_s == 0.15
 
 
 # idle skipping and camera names ------------------------------------------

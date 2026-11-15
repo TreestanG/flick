@@ -4,11 +4,14 @@ Part 3 of 4. The agent that writes a Python function per gesture, how it is trai
 
 Related files: `01-desktop-app-ui.md`, `02-webcam-tracking.md`, `04-action-mapping.md`.
 
+Everything in this file runs in the engine: a headless Python process that keeps running with no UI window open. The UI is a separate Tauri app (file 01) that connects over a local WebSocket.
+
 ## Goals
 
 - Train a new gesture by describing the motion and performing it when asked. No code written by hand.
 - The agent decides how much data it needs and tests itself on fresh samples it has never seen.
 - Runtime is fully local. The agent is only used while setting up a gesture.
+- Recognition needs no UI. Training needs a UI window, because the user has to see the prompts.
 
 ## Module layout
 
@@ -44,6 +47,8 @@ In the New command dialog (file 01):
 - **"What should happen?"** goes to the action planner (file 04).
 - **"Briefly describe the motion."** goes to the agent here, for example "swipe my right index finger across my forehead".
 
+The agent does not read the samples. It writes the function mostly from the motion description. After each batch it gets a short overview (for each part: how often it is visible and how far it moves, positives against negatives), and it can ask for statistics about a few parts at a time: the average position over the motion, net movement, travel, and the distance between two parts, for all samples or for named ones. The samples themselves are what the app tests each candidate on. This keeps each model call small and fast.
+
 The motion description is a hint, not ground truth. People describe motions loosely. The agent uses it to pick parts and a starting idea, and the tests on fresh samples decide whether the function is right. If the description and the data disagree, the agent says so before finishing.
 
 ## Training loop
@@ -73,11 +78,28 @@ The agent chooses how many samples to ask for. Each request is "k positives plus
 - Reject any function that returns true on empty, constant, or random input.
 - More negatives matter more than more positives. The 3k ratio is a starting default and can be changed in settings.
 
+**Reviewing samples before they are used:**
+- Every sample the user performs is also kept as a short video (320x240, about 15 frames a second), cut from just before the motion to just after it.
+- When a batch is complete (training or test), the user sees the videos, can record any sample again, and presses Submit. Only then does the batch go to the agent or the test.
+- Recording a sample again replaces it. It does not count toward the 40-sample budget, and the loop above is unchanged.
+- The videos live in the engine's memory for the length of the batch and are sent only to the UI window. They are not saved to disk and never leave the machine. The agent still sees only body-part numbers.
+
+**Bad samples:**
+- The agent can name training positives that are plainly not the gesture (almost no movement, a twitch, the hand moving back). The app asks the user to perform those again.
+- The new samples replace the old ones and do not count toward the 40-sample budget. At most 15 samples can be redone in one run.
+
+**Training and the UI window:**
+- The trainer runs in the engine. The window only shows `training_prompt`, `training_progress` and `training_result` events and sends `start_training`, `cancel_training` and `save_gesture` (file 01).
+- One training session at a time, started by one window.
+- If that window closes or its connection drops during training, the engine treats it as Cancel. Nothing is saved.
+- Recognition is paused while training, as the user's motions are samples, not commands.
+
 ## Model access (Fireworks)
 
 The agent uses open models hosted on Fireworks, through its OpenAI-compatible API.
 
-- **Key:** the user pastes their own Fireworks API key in settings. It is stored in the OS keychain (`keyring`), never in config files.
+- **Key:** the user pastes their own Fireworks API key in settings. The UI sends it to the engine once over the local socket and does not keep it. The engine stores it in the OS keychain (`keyring`), never in config files, and only ever sends back a masked form.
+- **Claude Code instead of a hosted model:** a setting. The same questions go to a folder on disk and an open Claude Code session answers them, one action per reply. It needs no key and works only while that session is open.
 - **Client:** one `ModelClient` interface with a single `complete(messages) -> text` method. Fireworks is the only backend for now. A small interface means another provider can be added later without touching the trainer.
 - **Why not sign in with a Claude plan:** Anthropic's terms do not allow third-party apps to sign users in with Claude.ai plans or route requests through plan credentials, so it is not part of this design.
 - **Function writing:** ask for plain text with one Python code block and extract it. This works on any model and does not depend on native tool calling.
@@ -97,6 +119,8 @@ The agent uses open models hosted on Fireworks, through its OpenAI-compatible AP
 2. Run every saved `detect` on it.
 3. Fire the action (file 04) only if exactly one function returns true. If several do, do nothing and log it.
 4. Cooldown of about 0.8 s after firing.
+
+All of this happens inside the engine, with or without a UI window. A `match` event is sent to any connected window, and dropped if there is none.
 
 ## Latency estimate
 
@@ -120,6 +144,8 @@ Measured from the moment the motion ends to the action running. These are estima
 
 `<config dir>/gesture_control/` holds `settings.json`, `gestures.json` (name, descriptions, resolved action, metadata), `gestures/<id>.py` (the functions), and `data/` (recorded positives, negatives and idle videos).
 
+Only the engine reads and writes these. The UI gets what it needs over the socket. `engine.json` (port and token) is not here: it is in the runtime folder, see file 01.
+
 ## Build order
 
 1. Dataset recording, including idle video.
@@ -133,4 +159,5 @@ Measured from the moment the motion ends to the action running. These are estima
 - Which Fireworks model to use as the default.
 - How much idle video is enough. Start with about 5 minutes of everyday use.
 - Whether to add an arming pose (for example, hold an open palm) to prevent accidental triggers.
+- Whether a dropped connection during training should cancel at once, or wait a few seconds for the window to reconnect.
 - Whether to keep a distance-based matcher (dynamic time warping) as a fallback or cross-check when the agent cannot find a function that passes.

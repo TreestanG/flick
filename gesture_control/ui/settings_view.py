@@ -10,7 +10,7 @@ from .. import autostart, keychain
 from ..store import DETECTION_DEFAULTS
 from . import theme
 from .theme import BORDER, GAP, HOVER, INSET, MUTED, PAD, SURFACE, TEXT
-from .widgets import button, card, card_header, clear, entry, label, separator, switch
+from .widgets import Scroll, button, card, card_header, clear, entry, label, separator, switch
 
 DETECTION_LABELS = {
     "start_speed": "Start speed (sizes per second)",
@@ -37,9 +37,7 @@ class SettingsView(ctk.CTkFrame):
 
         label(self, "Settings", "title").pack(fill="x", pady=(0, PAD))
 
-        self.scroll = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", corner_radius=0, scrollbar_button_color=BORDER,
-            scrollbar_button_hover_color=MUTED)
+        self.scroll = Scroll(self)
         self.scroll.pack(fill="both", expand=True)
 
         self._camera()
@@ -190,11 +188,11 @@ class SettingsView(ctk.CTkFrame):
 
     def _chrome(self) -> None:
         box = self._section("chrome", "Chrome", "globe")
-        row = self._row(box, "Connection")
-        self.chrome_button = button(row, "Connect", lambda: self.app.bus.send("connect_chrome"),
+        row = self._row(box, "Connection", "Connects by itself when the app starts.")
+        self.chrome_button = button(row, "Retry", lambda: self.app.bus.send("connect_chrome"),
                                     kind="quiet", width=80)
         self.chrome_button.pack(side="right")
-        self.chrome_status = label(row, "Not connected", "muted", anchor="e")
+        self.chrome_status = label(row, "Connecting…", "muted", anchor="e")
         self.chrome_status.pack(side="right", padx=PAD)
         self._end(box)
 

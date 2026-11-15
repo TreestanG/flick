@@ -5,7 +5,7 @@ import pytest
 
 from gesture_control import store
 from gesture_control.contract import Bus, action_type
-from gesture_control.fake_backend import BUDGET, FakeBackend
+from fake_backend import BUDGET, FakeBackend
 from gesture_control.ui import theme
 
 
@@ -123,13 +123,11 @@ def test_cancel_training_saves_nothing(backend):
     assert [g["id"] for g in changed.data["gestures"]] == ["close-tab", "my-script"]
 
 
-def test_chrome_action_needs_connection(backend):
+def test_chrome_connects_by_itself(backend):
     bus = backend
-    bus.send("test_action", gesture_id="close-tab")
-    result, _ = wait_for(bus, "action_result")
-    assert not result.data["ok"] and "Chrome" in result.data["message"]
-    bus.send("connect_chrome")
-    while True:
+    first, _ = wait_for(bus, "chrome_status")
+    assert not first.data["connected"] and first.data["message"] == "Connecting…"
+    while True:                                         # nobody sends connect_chrome
         status, _ = wait_for(bus, "chrome_status")
         if status.data["connected"]:
             break

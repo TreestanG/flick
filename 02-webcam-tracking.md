@@ -4,9 +4,11 @@ Part 2 of 4. Turns the webcam into a stream of body-part positions with visibili
 
 Related files: `01-desktop-app-ui.md`, `03-gesture-agent-and-detection.md`, `04-action-mapping.md`.
 
+Everything in this file runs in the engine: a headless Python process that keeps running with no UI window open. The UI is a separate Tauri app (file 01) that connects over a local WebSocket.
+
 ## Goals
 
-- Always-on webcam with low CPU use.
+- Always-on webcam with low CPU use, whether or not a UI window is open.
 - Track fingertips, the palm and back of the hand, ears, eyes, nose, bottom of the head and top of the head.
 - Each part has a state, including "not visible".
 - Run only the models that saved gestures actually need.
@@ -16,11 +18,13 @@ Related files: `01-desktop-app-ui.md`, `03-gesture-agent-and-detection.md`, `04-
 ```
 Camera thread -> MediaPipe models (only those needed) -> Frame -> Segmenter -> Segment
                                                            |
-                                                           +--> preview events to the UI
+                                                           +--> preview stream and status events,
+                                                                only if a UI window is connected
 ```
 
 - Camera and tracking run on a dedicated thread.
 - The segmenter output goes to the detector (file 03) on the same thread, to keep latency low.
+- Nothing in the pipeline depends on a UI. With no window connected, the preview branch does no work.
 
 ## Module layout
 
@@ -29,11 +33,14 @@ camera.py      # open the webcam from the main thread, read only the latest fram
 parts.py       # part catalog, which model provides each part, derived values
 tracker.py     # runs the needed MediaPipe models, outputs a Frame
 segmenter.py   # speed-based start/stop state machine, outputs a Segment
+preview.py     # newest-frame slot and JPEG encoder for the preview stream
+server.py      # local WebSocket server the UI connects to (messages are in file 01)
 ```
 
 ## Camera
 
-- Open the webcam on the main thread, then hand it to the camera thread. This avoids a permission problem on macOS.
+- Open the webcam on the engine's main thread, then hand it to the camera thread. This avoids a permission problem on macOS.
+- The tray icon (file 01) also needs the main thread on macOS. Open the camera first, then start the tray loop there.
 - 640x480 at 30 fps is enough. Keep the buffer to one frame so old frames are never processed.
 - If the camera disappears, mark the tracker `Camera error` and retry every few seconds.
 
@@ -124,14 +131,35 @@ Starting settings, all needing tuning on a real camera:
 
 | Setting | Start value |
 |---|---|
-| `start_speed` | 1.2 |
-| `stop_speed` | 0.6 |
+| `start_speed` | 0.5 |
+| `stop_speed` | 0.25 |
 | `quiet_ms` | 150 |
 | `min_dur_ms` | 250 |
 | `max_dur_ms` | 2500 |
 | `cooldown_ms` | 800 |
 
-Show the live speed and segment boundaries in a debug readout so these can be tuned by eye.
+Show the live speed and segment boundaries in a debug readout so these can be tuned by eye. The speed travels in the `tracker_status` event, and the readout lives in the UI's Advanced settings.
+
+## Preview stream
+
+The UI shows a live camera image. The engine makes it only when asked.
+
+- **On and off:** a window sends `set_preview` (file 01). The engine counts the windows that want the preview. At zero, it does no copying, drawing or encoding.
+- **Source:** the tracking thread puts its newest camera frame and tracked points in a single slot. It never waits for the encoder.
+- **Encoder:** a separate thread takes the newest frame from the slot about 15 times a second, so roughly every second camera frame.
+- **Dots:** if "show tracked points" is on, small dots are drawn on the image before encoding.
+- **Format:** JPEG, 640x480, quality about 70. Not mirrored, since the UI mirrors it.
+- **Sending:** one binary WebSocket message per frame. Each window has its own one-frame slot, so a slow window drops frames instead of building a backlog.
+
+Rough cost, estimated and not measured:
+
+| What | Estimate |
+|---|---|
+| Size of one frame | 20 to 40 KB |
+| Data rate at 15 fps | about 0.3 to 0.6 MB per second, on localhost only |
+| Encoding time | about 1 to 3 ms per frame |
+
+If this turns out to be too heavy, lower the size (for example 480x360) before lowering the rate.
 
 ## Latency in this stage
 
@@ -144,13 +172,14 @@ The full end-to-end estimate is in file 03.
 
 ## Platform notes
 
+- The camera permission belongs to the engine process, not the UI.
 - macOS asks for camera permission, and the first request must come from the main thread.
 - Windows can open the camera faster with the DirectShow backend.
 - Linux needs access to the video device.
 
 ## Build order
 
-1. Frames from the camera into a preview window.
+1. Frames from the camera into the preview stream, shown in the UI (file 01).
 2. Hand tracking with the Frame format.
 3. Segmenter with the debug readout.
 4. Head parts (pose first, then face), with states.
@@ -163,3 +192,5 @@ The full end-to-end estimate is in file 03.
 - Pose or face model for the nose and eyes: whether the extra precision of the face model is worth its cost.
 - How to estimate the top of the head well enough to be useful.
 - Whether the palm-facing value is reliable enough to expose to the agent.
+- Preview size and JPEG quality, after measuring CPU use with a window open.
+- Whether to draw the dots in the engine (simple) or send the points and draw them in the UI (sharper, more work).

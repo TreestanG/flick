@@ -1,4 +1,5 @@
-"""Start on login, per platform. Nothing here runs until the user flips the switch."""
+"""Start on login, per platform. It starts the engine, not the window (file 01).
+Nothing here runs until the user flips the switch."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def _command() -> list[str]:
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--background"]
+        return [sys.executable]
     exe = Path(sys.executable)
     windowless = exe.with_name("pythonw.exe")
     if sys.platform == "win32" and windowless.exists():
@@ -20,7 +21,7 @@ def _command() -> list[str]:
     # Login items start in an arbitrary folder, so point Python at the package explicitly.
     root = Path(__file__).resolve().parent.parent
     code = f"import sys; sys.path.insert(0, {str(root)!r}); from gesture_control.__main__ import main; main()"
-    return [str(exe), "-c", code, "--background"]
+    return [str(exe), "-c", code]
 
 
 def _mac_plist() -> Path:

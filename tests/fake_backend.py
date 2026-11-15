@@ -1,8 +1,8 @@
-"""A stand-in for the tracker, agent and actions (files 02 to 04).
+"""A stand-in for the engine's back end, for tests only. The app cannot run it.
 
-It speaks the contract in `contract.py` with made-up data so every screen can
-be built and exercised before the real parts exist. Nothing here touches the
-camera, the network, the keychain or the disk.
+It speaks the contract in `contract.py` with made-up data, so the server and
+the contract can be tested without a camera. Nothing here touches the camera,
+the network, the keychain or the disk.
 
 Training always passes, unless the motion description contains the word
 "fail", which walks through the budget and ends in the not-passed outcome.
@@ -10,6 +10,8 @@ Training always passes, unless the motion description contains the word
 
 from __future__ import annotations
 
+import base64
+import io
 import math
 import queue
 import random
@@ -19,7 +21,7 @@ import time
 
 from PIL import Image, ImageDraw
 
-from .contract import Bus, PreviewFrame
+from gesture_control.contract import Bus, PreviewFrame
 
 BUDGET = 40
 PREVIEW_SIZE = (480, 360)
@@ -64,8 +66,13 @@ def _guess_action(sentence: str) -> dict:
 
 
 class FakeBackend:
-    def __init__(self, bus: Bus, speed: float = 1.0, preview: bool = True):
+    def __init__(self, bus: Bus, speed: float = 1.0, preview: bool = True,
+                 review: bool = False):
+        """With `review`, each batch waits on the review page for
+        `submit_samples`, as the real back end does. Without it, batches go
+        straight through."""
         self.bus = bus
+        self.review = review
         self.speed = speed          # time multiplier, raised in tests
         self.preview = preview
         self.armed = True
@@ -103,7 +110,7 @@ class FakeBackend:
         emit("cameras", devices=["Default camera", "Test image"])
         emit("gestures_changed", gestures=list(self.gestures))
         emit("idle_videos", clips=[])
-        emit("chrome_status", connected=False, message="Not connected")
+        self._cmd_connect_chrome()          # connects by itself; nobody has to ask
         start = self._now()
         next_status = next_match = 0.0
         while not self._stop.is_set():
@@ -253,11 +260,56 @@ class FakeBackend:
         if tr["phase"] == "revising":
             self._begin_batch("testing" if not tr.get("retest") else "collecting")
             return
+        if tr.get("waiting"):
+            return                           # on the review page, until submit
         tr["index"] += 1
         tr["next_at"] = now + tr["sample_gap"]
+        if self.review:
+            self._sample(tr["index"] - 1)
         self._prompt()
         if tr["index"] < tr["count"]:
             return
+        if self.review:
+            tr["waiting"] = True
+            self._ask_review()
+            return
+        self._after_batch()
+
+    def _sample(self, index: int) -> None:
+        """A made-up video of one sample: a dot crossing the picture."""
+        tr = self._training
+        frames = []
+        shift = self._rng.random() * 0.3
+        for step in range(10):
+            image = Image.new("RGB", (160, 120), (46, 44, 42))
+            x = (0.15 + shift + 0.05 * step) * 160
+            ImageDraw.Draw(image).ellipse((x - 8, 52, x + 8, 68), fill=(108, 184, 240))
+            out = io.BytesIO()
+            image.save(out, "JPEG", quality=60)
+            frames.append(base64.b64encode(out.getvalue()).decode("ascii"))
+        self.bus.emit("training_sample", index=index, count=tr["count"], phase=tr["phase"],
+                      fps=15, frames=frames)
+
+    def _ask_review(self) -> None:
+        tr = self._training
+        self.bus.emit("training_review", phase=tr["phase"], count=tr["count"],
+                      asked=tr["asked"], budget=BUDGET)
+
+    def _cmd_submit_samples(self) -> None:
+        tr = self._training
+        if tr and tr.get("waiting"):
+            tr["waiting"] = False
+            self._after_batch()
+
+    def _cmd_rerecord_sample(self, index: int | None = None) -> None:
+        tr = self._training
+        if tr and tr.get("waiting"):
+            for i in (range(tr["count"]) if index is None else [index]):
+                self._sample(i)
+            self._ask_review()
+
+    def _after_batch(self) -> None:
+        tr = self._training
         if tr["phase"] == "collecting":
             self._revise(retest=False)       # write the function, then test it
         elif tr["fail"]:

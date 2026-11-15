@@ -111,15 +111,21 @@ class NewCommandDialog(Dialog):
         self.round = round
         self._set_phase(phase)
         if phase == "revising":
-            self.prompt.configure(text="One moment")
-            self.count.configure(text="Revising the gesture function…")
+            self.prompt.configure(text="One moment", text_color=theme.TEXT)
+            self.count.configure(text="Writing the gesture function…")
 
-    def on_prompt(self, phase: str, count: int, index: int, asked: int, budget: int) -> None:
+    def on_prompt(self, phase: str, count: int, index: int, asked: int, budget: int,
+                  ready: int = 0) -> None:
         if not self.training:
             return
         self._set_phase(phase)
-        self.prompt.configure(text="Perform the motion")
-        self.count.configure(text=f"Sample {min(index + 1, count)} of {count}")
+        sample = f"Sample {min(index + 1, count)} of {count}"
+        if ready:                           # the countdown: 1, 2, then go
+            self.prompt.configure(text=f"Get ready…  {ready}", text_color=theme.MUTED)
+            self.count.configure(text=f"{sample}. Keep still until it says go.")
+        else:
+            self.prompt.configure(text="Go: perform the motion", text_color=theme.TEXT)
+            self.count.configure(text=sample)
         self.bar.set(index / count if count else 0)
         self.asked.configure(text=f"Samples asked: {asked} of {budget}")
 
@@ -142,6 +148,9 @@ class NewCommandDialog(Dialog):
             label(view, "Uses", "small").pack(fill="x")
             label(view, ", ".join(p.replace("_", " ") for p in parts) or "–",
                   wraplength=self.WIDTH).pack(fill="x", pady=(0, GAP))
+            if message:                     # the agent's note, e.g. the motion differs
+                label(view, "Note", "small").pack(fill="x")     # from its description
+                label(view, message, wraplength=self.WIDTH).pack(fill="x", pady=(0, GAP))
             button(view, "View code", self.view_code, kind="link").pack(anchor="w")
             self._buttons(view, ("Save", self.save, "primary"), ("Cancel", self.close, "secondary"))
         else:

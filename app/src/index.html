@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gesture Control</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="rail" id="rail" aria-label="Pages"></nav>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="pill" id="app-pill" type="button"></button>
+
+      <label class="search">
+        <span class="icon" id="search-icon"></span>
+        <input id="search" type="search" placeholder="Search" autocomplete="off" spellcheck="false">
+        <kbd>Ctrl F</kbd>
+      </label>
+
+      <button class="chip" id="arm-chip" type="button">
+        <span class="dot"></span><span class="chip-text">Connecting</span>
+      </button>
+    </header>
+
+    <div class="banner" id="banner" hidden>
+      <div>
+        <strong>Engine not running</strong>
+        <div class="small" id="banner-reason"></div>
+      </div>
+      <button class="btn primary" id="banner-start" type="button">Start engine</button>
+    </div>
+
+    <main class="content">
+      <section class="page" id="page-main" hidden></section>
+      <section class="page" id="page-first_run" hidden></section>
+      <section class="page" id="page-settings" hidden></section>
+    </main>
+  </div>
+
+  <div id="menus"></div>
+  <div id="dialogs"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

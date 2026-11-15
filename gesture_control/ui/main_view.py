@@ -12,7 +12,8 @@ from ..contract import PreviewFrame, action_type, describe_action
 from . import theme
 from .icons import ACTION_ICONS
 from .theme import BORDER, ERROR_TEXT, GAP, INSET, MUTED, PAD, SOFT
-from .widgets import Badge, bullet, button, card, card_header, clear, inset, label, separator
+from .widgets import (Badge, Scroll, bullet, button, card, card_header, clear, inset, label,
+                      separator)
 
 PREVIEW = (176, 132)   # a small status preview, 4:3
 
@@ -25,6 +26,7 @@ class MainView(ctk.CTkFrame):
         self._camera_ok = True
         self._filter = ""
         self._gesture_widgets: list = []
+        self._texts: dict = {}      # what each status line shows now
 
         top = clear(self)
         top.pack(fill="x", pady=(0, PAD))
@@ -32,9 +34,7 @@ class MainView(ctk.CTkFrame):
         button(top, "+  New command", self.app.new_command, kind="primary", width=140,
                height=34).pack(side="right")
 
-        self.grid_box = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", corner_radius=0, scrollbar_button_color=BORDER,
-            scrollbar_button_hover_color=MUTED)
+        self.grid_box = Scroll(self)
         self.grid_box.pack(fill="both", expand=True)
         self.grid_box.grid_columnconfigure(0, weight=1, uniform="cards")
         self.grid_box.grid_columnconfigure(1, weight=1, uniform="cards")
@@ -112,31 +112,38 @@ class MainView(ctk.CTkFrame):
         self.canvas.coords(self._image_item, (w - size[0]) // 2, (h - size[1]) // 2)
         self.canvas.itemconfigure(self._text_item, text="")
 
+    def _say(self, line, text: str, **kw) -> None:
+        """Change a status line only if it differs: every configure makes
+        customtkinter redraw the label, four times a second per line."""
+        if self._texts.get(line) != (text, kw):
+            self._texts[line] = (text, kw)
+            line.configure(text=text, **kw)
+
     def set_motion(self, speed, moving, segment, tracked: int) -> None:
         """Live speed and the last motion's boundaries, for tuning by eye."""
         if moving is None:              # a back end without the segmenter
             return
-        self.speed_line.configure(
-            text=f"•   Speed {speed:.2f} · {'moving' if moving else 'still'} · {tracked} parts")
+        self._say(self.speed_line,
+                  f"•   Speed {speed:.2f} · {'moving' if moving else 'still'} · {tracked} parts")
         if segment:
-            self.motion_line.configure(
-                text=f"•   Motion: {segment['ms']} ms, {segment['reason']} "
-                     f"(at {segment['t']:.1f} s)")
+            self._say(self.motion_line, f"•   Motion: {segment['ms']} ms, {segment['reason']} "
+                                        f"(at {segment['t']:.1f} s)")
 
     def set_tracker(self, hand_seen: bool, fps, camera_ok: bool, loading: bool = False) -> None:
         self._camera_ok = camera_ok
         if camera_ok:
-            self.hand_line.configure(text="•   Hand " + ("seen" if hand_seen else "not seen"))
-            self.fps_line.configure(text=f"•   {fps:.0f} fps")
-            if loading:
-                self.camera_badge.set("Loading models", "neutral")
-            else:
-                self.camera_badge.set(
-                    *(("Hand seen", "accent") if hand_seen else ("No hand", "warn")))
+            self._say(self.hand_line, "•   Hand " + ("seen" if hand_seen else "not seen"))
+            self._say(self.fps_line, f"•   {fps:.0f} fps")
+            badge = ("Loading models", "neutral") if loading else \
+                ("Hand seen", "accent") if hand_seen else ("No hand", "warn")
         else:
-            self.hand_line.configure(text="•   Camera error, retrying")
-            self.fps_line.configure(text="•   – fps")
-            self.camera_badge.set("Camera error", "error")
+            self._say(self.hand_line, "•   Camera error, retrying")
+            self._say(self.fps_line, "•   – fps")
+            badge = ("Camera error", "error")
+        if self._texts.get(self.camera_badge) != badge:
+            self._texts[self.camera_badge] = badge
+            self.camera_badge.set(*badge)
+        if not camera_ok:
             self._photo = None
             self.canvas.itemconfigure(self._image_item, image="")
             self.canvas.itemconfigure(self._text_item, text="Camera error")
@@ -144,7 +151,7 @@ class MainView(ctk.CTkFrame):
                                self.canvas.winfo_height() // 2)
 
     def set_last(self, text: str, error: bool = False) -> None:
-        self.last_line.configure(text="•   " + text, text_color=ERROR_TEXT if error else SOFT)
+        self._say(self.last_line, "•   " + text, text_color=ERROR_TEXT if error else SOFT)
 
     def set_armed(self, armed: bool) -> None:
         self.arm_button.configure(text="Pause  →" if armed else "Arm  →")

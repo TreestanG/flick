@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import sys
+import time
 import tkinter as tk
 
 import customtkinter as ctk
@@ -11,6 +13,87 @@ from . import theme
 from .icons import icon
 from .theme import (ACCENT_TEXT, BORDER, CARD_RADIUS, ERROR_TEXT, HOVER, INSET, MUTED, PAD,
                     RADIUS, SOFT, SURFACE, TEXT)
+
+
+class Scroll(ctk.CTkScrollableFrame):
+    """A scrollable area that glides. customtkinter jumps 20 px per wheel
+    notch in one go; here each notch moves a target and the view eases toward
+    it a few pixels at a time, so the eye can follow. Each step is drawn
+    before the next is scheduled: Tk runs timers ahead of redraws, so without
+    that several steps pile up behind one repaint and the page still jumps.
+    `Scroll.moved_at` is when any of them last moved, so the window can hold
+    back other drawing."""
+
+    NOTCH_PX = 90           # one click of the wheel
+    SETTLE_S = 0.055        # time constant of each of the two easing stages
+    STEP_MS = 8
+    moved_at = 0.0
+
+    def __init__(self, master, **kw):
+        kw.setdefault("fg_color", "transparent")
+        kw.setdefault("corner_radius", 0)
+        kw.setdefault("scrollbar_button_color", BORDER)
+        kw.setdefault("scrollbar_button_hover_color", MUTED)
+        super().__init__(master, **kw)
+        self._parent_canvas.configure(yscrollincrement=1)       # units are pixels
+        self._target = self._aim = 0.0
+        self._stepped_at = 0.0
+        self._job = None
+
+    @classmethod
+    def busy(cls) -> bool:
+        return time.monotonic() - cls.moved_at < 0.2
+
+    def _limit(self) -> float:
+        box = self._parent_canvas.bbox("all")
+        return max(0.0, (box[3] if box else 0) - self._parent_canvas.winfo_height())
+
+    def _mouse_wheel_all(self, event):
+        if self._shift_pressed or not self._check_if_valid_scroll(event.widget):
+            return super()._mouse_wheel_all(event)
+        canvas = self._parent_canvas
+        if canvas.yview() == (0.0, 1.0):
+            return                          # everything fits
+        if getattr(event, "num", None) in (4, 5):               # X11
+            notches = -1.0 if event.num == 4 else 1.0
+        elif sys.platform == "darwin":
+            notches = -event.delta / 3
+        else:
+            notches = -event.delta / 120    # a touchpad sends many small ones
+        if self._job is None:
+            self._target = self._aim = canvas.canvasy(0)
+            self._stepped_at = time.monotonic() - self.STEP_MS / 1000
+        self._target = min(max(self._target + notches * self.NOTCH_PX, 0.0), self._limit())
+        if self._job is None:
+            self._glide()
+
+    def _glide(self) -> None:
+        self._job = None
+        canvas = self._parent_canvas
+        position = canvas.canvasy(0)
+        gap = self._target - position
+        if abs(gap) < 1:
+            return
+        now = time.monotonic()
+        # By elapsed time, not per step, so slow repaints do not slow the glide.
+        # Two stages: the aim follows the target and the view follows the aim,
+        # so a new wheel notch speeds the page up gradually instead of kicking it.
+        share = 1 - math.exp(-(now - self._stepped_at) / self.SETTLE_S)
+        self._stepped_at = now
+        self._aim += (self._target - self._aim) * share
+        step = round((self._aim - position) * share) or (1 if gap > 0 else -1)
+        canvas.yview_scroll(step, "units")
+        Scroll.moved_at = now
+        if canvas.canvasy(0) == position:   # stuck at an edge
+            return
+        canvas.update_idletasks()           # paint this step now
+        self._job = self.after(self.STEP_MS, self._glide)
+
+    def destroy(self):
+        if self._job is not None:
+            self.after_cancel(self._job)
+            self._job = None
+        super().destroy()
 
 
 def label(master, text: str = "", kind: str = "body", **kw):
