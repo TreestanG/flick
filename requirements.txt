@@ -1,0 +1,6 @@
+customtkinter>=5.2
+pillow>=10
+pystray>=0.19
+keyring>=24
+mediapipe>=0.10.32
+opencv-python>=4.9
