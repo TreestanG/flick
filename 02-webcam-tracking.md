@@ -113,7 +113,7 @@ Running all three models all the time costs roughly three times as much as the h
 
 1. **Record everything, run only what is needed.** During training all models run, so the agent can see every part. Each saved gesture lists the parts it uses. At runtime the app runs only the models needed by the union of saved gestures. A hand-only set costs the same as hand tracking alone.
 2. **Slower rates for slow parts.** The head moves slowly, so the face or pose model can run at about 10 times a second while the hand runs at 30. Hold the last head position between updates.
-3. **Idle skipping.** With no hand or motion for about 2 seconds, run tracking on every third frame. Return to full rate as soon as something appears.
+3. **Idle skipping (off).** With no hand or motion for about 2 seconds, tracking could run on every third frame only. It is off: every frame is tracked, because a hand that came into view already moving was picked up late and fluid gestures were missed. `IdleGate(every=3)` turns it back on.
 
 Rough cost, from general knowledge and not measured: the hand model takes about 5 to 15 ms per frame on a recent CPU, and the other two are in the same range. Measure on the target machine before tuning.
 

@@ -128,6 +128,19 @@ def test_swipe_becomes_one_segment_with_pre_roll():
     assert s.frames[-1].t <= s.t1 + 1e-9               # the quiet tail is trimmed
 
 
+def test_begin_records_from_that_frame_until_the_motion_stops():
+    seg = Segmenter(DETECTION_DEFAULTS)
+    found = []
+    for i, frame in enumerate(stream(swipe(still=15, moving=15))):
+        if i == 5:
+            seg.begin()                 # "go", ten frames before the hand moves
+        found += [s for s in [seg.update(frame)] if s is not None]
+    assert len(found) == 1 and seg.last["kept"]
+    s = found[0]
+    assert abs(s.t0 - 5 / 30) < 1e-9 and s.frames[0].t == s.t0     # from "go", no pre-roll
+    assert s.lead == "right_hand" and 1.0 <= s.t1 <= 1.2          # ends when the swipe does
+
+
 def test_same_split_with_all_parts_or_only_the_needed_ones():
     _, everything = run(swipe())
     _, needed = run(swipe(), parts=["right_index_tip"])
@@ -165,7 +178,8 @@ def test_settings_apply():
 # idle skipping and camera names ------------------------------------------
 
 def test_idle_gate_skips_two_of_three_frames():
-    gate = IdleGate()
+    assert all(IdleGate().should_track(3.5, n) for n in range(6))   # by default nothing is skipped
+    gate = IdleGate(every=3)
     gate.note(1.0, True)
     assert all(gate.should_track(2.5, n) for n in range(6))
     assert [gate.should_track(3.5, n) for n in range(6)] == [True, False, False] * 2

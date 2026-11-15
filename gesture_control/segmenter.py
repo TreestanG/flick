@@ -10,6 +10,7 @@ way as runtime (only the needed parts).
 
 from __future__ import annotations
 
+import bisect
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -21,6 +22,12 @@ SMOOTH_S = 0.05      # time constant of the speed filter
 HELD_S = 0.15         # a part unchanged this long is still, not just between updates
 LOST_S = 0.1          # the moving group may drop out this long before the motion is discarded
 MIN_SCALE = 0.02
+HISTORY_S = 5.0       # live: how far back frames are kept
+LOOK_BACK_S = (0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0)    # live: the stretches checked, ending now
+# A motion has stopped when its speed is this small a share of the fastest it
+# reached. A fixed stop speed alone sits below the tracker's own jitter on some
+# cameras, so a hand held still after a motion never counted as stopped.
+END_SHARE = 0.15
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,11 @@ class Segmenter:
         self.configure(settings)
         self.set_parts(parts)
         self.speed = 0.0            # smoothed, for the debug readout
+        # A training sample starts when its countdown ends (see `begin`). If that
+        # one is discarded, the next motion is taken to begin as soon as anything
+        # moves faster than stop_speed, not start_speed, so a slow performance
+        # is recorded too.
+        self.eager = False
         self.moving = False
         self.last: dict | None = None      # outcome of the last motion: ms, kept, reason
         self._prev: dict = {}       # part -> (x, y, t)
@@ -52,6 +64,16 @@ class Segmenter:
         self._quiet: tuple | None = None    # (t, number of frames) when the speed dropped
         self._lost_at: float | None = None
         self._wait_quiet = False
+        self._history: deque = deque()      # (frame, smoothed speed, lead), the last HISTORY_S
+        self._begin = False         # start a motion on the next frame, whatever the speed
+        self._seen = True           # this motion has moved, so going quiet ends it
+        self._peak = 0.0            # the fastest this motion has been
+
+    def begin(self) -> None:
+        """Take a motion to start on the next frame: the countdown of a training
+        sample has just ended and the user is assumed to be moving. It replaces
+        a motion already under way and ends, as usual, when the motion stops."""
+        self._begin = True
 
     def configure(self, settings: dict) -> None:
         self.start_speed = float(settings["start_speed"])
@@ -100,6 +122,41 @@ class Segmenter:
         return any(frame.state(name) == P.VISIBLE for name in self.parts
                    if P.group(name) == group_name)
 
+    # looking back (live recognition) -------------------------------------
+
+    def windows(self) -> list:
+        """What live recognition checks: stretches of the last few seconds
+        that all end at the newest frame. Nothing has to start, stop or hold
+        still first. One goes back for as long as there has been motion (to
+        where the speed last fell to a small share of the fastest since); the
+        others go back fixed lengths, since a gesture function is written for
+        a whole motion and nothing says where this one began. Longest last."""
+        items = list(self._history)
+        if len(items) < 3:
+            return []
+        now = items[-1][0].t
+        starts = []
+        peak = 0.0
+        for i in range(len(items) - 1, -1, -1):
+            speed = items[i][1]
+            if peak > 0 and speed <= END_SHARE * peak:
+                starts.append(i)
+                break
+            peak = max(peak, speed)
+        times = [item[0].t for item in items]
+        for back in LOOK_BACK_S:
+            starts.append(bisect.bisect_left(times, now - back))
+            if times[0] > now - back:
+                break                       # the history is no longer than this
+        found = []
+        for i in sorted(set(starts), reverse=True):
+            if len(items) - i < 3:
+                continue
+            fastest = max(range(i, len(items)), key=lambda j: items[j][1])
+            found.append(Segment(tuple(item[0] for item in items[i:]), times[i], now,
+                                 items[fastest][2]))
+        return found
+
     # state machine -----------------------------------------------------
 
     def update(self, frame: P.Frame) -> Segment | None:
@@ -107,29 +164,49 @@ class Segmenter:
         dt = frame.t - self._last_t if self._last_t is not None else 0.0
         self._last_t = frame.t
         self.speed += (raw - self.speed) * (1 - math.exp(-dt / SMOOTH_S)) if dt > 0 else 0.0
+        self._history.append((frame, self.speed, lead))
+        while frame.t - self._history[0][0].t > HISTORY_S:
+            self._history.popleft()
+        if self._begin:
+            self._begin = self._wait_quiet = False
+            self.moving = True
+            self._frames = []               # no pre-roll: the sample starts at "go"
+            self._lead, self._t0 = lead, frame.t
+            self._quiet = self._lost_at = None
+            # Someone a moment late has not moved yet; that is not the end of it.
+            self._seen = self.speed >= self.stop_speed and bool(lead)
+            self._peak = self.speed
         if self.moving:
-            return self._while_moving(frame)
+            return self._while_moving(frame, lead)
         self._buffer.append(frame)
         while frame.t - self._buffer[0].t > PRE_ROLL_S:
             self._buffer.popleft()
         if self._wait_quiet:
             self._wait_quiet = self.speed >= self.stop_speed
-        elif self.speed > self.start_speed and lead:
+        elif self.speed > (self.stop_speed if self.eager else self.start_speed) and lead:
             self.moving = True
             self._frames = list(self._buffer)
             self._lead, self._t0 = lead, frame.t
             self._quiet = self._lost_at = None
+            self._seen = True
+            self._peak = self.speed
         return None
 
-    def _while_moving(self, frame: P.Frame) -> Segment | None:
+    def _while_moving(self, frame: P.Frame, lead: str = "") -> Segment | None:
         self._frames.append(frame)
-        if self._group_visible(frame, self._lead):
+        if not self._seen:                  # begun on "go": wait for the first movement
+            if self.speed >= self.stop_speed and lead:
+                self._seen, self._lead = True, lead
+        elif self._group_visible(frame, self._lead):
             self._lost_at = None
         else:
             self._lost_at = frame.t if self._lost_at is None else self._lost_at
             if frame.t - self._lost_at > LOST_S:
                 return self._end(frame.t, "lost tracking")
-        if self.speed < self.stop_speed:
+        self._peak = max(self._peak, self.speed)
+        if not self._seen:
+            pass
+        elif self.speed < max(self.stop_speed, END_SHARE * self._peak):
             if self._quiet is None:
                 self._quiet = (frame.t, len(self._frames))
             if frame.t - self._quiet[0] >= self.quiet_s:

@@ -5,14 +5,12 @@ sentences and body-part numbers, never images."""
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 import urllib.error
 import urllib.request
 from typing import Protocol
 
-from . import keychain, store
+from . import keychain
 
 BASE_URL = "https://api.fireworks.ai/inference/v1"
 # Top of Fireworks' own list for code generation when this was written (Nov 2026).
@@ -100,63 +98,91 @@ class FireworksClient:
             raise ModelError("Fireworks sent a reply that could not be read.") from None
 
 
-class ChatClient:
-    """Hands each question to a Claude Code session instead of a hosted model.
+CLAUDE_MODEL = "claude-opus-5-5"
+CLAUDE_MAX_TOKENS = 16000
+# The app tests every answer on the user's samples, so a wrong first try is
+# cheap and a slow one is not: keep the model's deliberation short.
+CLAUDE_EFFORT = "low"
+CLAUDE_TIMEOUT_S = 180.0
 
-    The question goes into `<runtime folder>/handoff/request.json` (the whole
-    conversation so far, the newest message last). The session answers by
-    writing `reply.json` next to it: {"run": ..., "step": ..., "text": "..."}
-    with the same run and step. Nothing leaves the machine by this route
-    except through that session. It only works while the session is open."""
 
-    WAIT_S = 30 * 60.0
-    POLL_S = 0.5
+class ClaudeClient:
+    """Claude through the Anthropic API, with the official SDK."""
 
-    def __init__(self, folder=None, wait: float = WAIT_S):
-        self.folder = folder or handoff_dir()
-        self.wait = wait
-        self.run = time.strftime("%Y%m%d-%H%M%S")
-        self.step = 0
+    def __init__(self, api_key: str, model: str = "", timeout: float = CLAUDE_TIMEOUT_S):
+        import anthropic
+        self.anthropic = anthropic
+        model = model.strip()
+        self.model = model if model.startswith("claude-") else CLAUDE_MODEL
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=1)
+        # What Claude sent back for each of its turns, whole: its thinking
+        # blocks have to be returned unchanged on later requests.
+        self.turns: list = []
 
-    def _write(self, name: str, body: dict) -> None:
-        self.folder.mkdir(parents=True, exist_ok=True)
-        tmp = self.folder / (name + ".tmp")
-        tmp.write_text(json.dumps(body, indent=1), encoding="utf-8")
-        os.replace(tmp, self.folder / name)
+    def _history(self, messages: list[dict]) -> tuple[str, list]:
+        """The trainer keeps plain text. Split off the system prompt and put
+        Claude's own turns back as the blocks it produced."""
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        history, turn = [], 0
+        for message in messages:
+            if message["role"] == "system":
+                continue
+            content = message["content"]
+            if message["role"] == "assistant":
+                if turn < len(self.turns) and self.turns[turn][0] == content:
+                    content = self.turns[turn][1]
+                turn += 1
+            history.append({"role": message["role"], "content": content})
+        return system, history
 
     def complete(self, messages: list[dict]) -> str:
-        self.step += 1
-        request, reply = self.folder / "request.json", self.folder / "reply.json"
+        anthropic = self.anthropic
+        system, history = self._history(messages)
         try:
-            reply.unlink(missing_ok=True)
-            self._write("request.json", {"run": self.run, "step": self.step,
-                                         "asked_at": time.strftime("%H:%M:%S"),
-                                         "messages": messages})
-        except OSError as error:
-            raise ModelError(f"Could not write the question for Claude Code: {error}") from None
-        end = time.monotonic() + self.wait
-        try:
-            while time.monotonic() < end:
-                time.sleep(self.POLL_S)
-                try:
-                    answer = json.loads(reply.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue                    # not there yet, or still being written
-                if answer.get("run") == self.run and answer.get("step") == self.step \
-                        and isinstance(answer.get("text"), str):
-                    return answer["text"]
-            raise ModelError("Claude Code did not answer. Is the session open and watching "
-                             "for training questions?")
-        finally:
-            for path in (request, reply):       # nothing is left waiting for an answer
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            response = self.client.beta.messages.create(
+                model=self.model,
+                max_tokens=CLAUDE_MAX_TOKENS,
+                system=[{"type": "text", "text": system,
+                         "cache_control": {"type": "ephemeral"}}],   # the same every call
+                messages=history,
+                output_config={"effort": CLAUDE_EFFORT},
+                # If a safety check declines the request, the API retries it on
+                # another Claude model inside the same call.
+                betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default",
+            )
+        except anthropic.AuthenticationError:
+            raise ModelError("Anthropic rejected the API key. Check it in settings.") from None
+        except anthropic.PermissionDeniedError:
+            raise ModelError("This Anthropic API key may not use that model.") from None
+        except anthropic.NotFoundError:
+            raise ModelError(f"Anthropic does not know the model {self.model}. "
+                             "Check the model name in settings.") from None
+        except anthropic.RateLimitError:
+            raise ModelError("Anthropic is rate limiting this key. Try again in a "
+                             "minute.") from None
+        except anthropic.BadRequestError as error:
+            raise ModelError(f"Anthropic refused the request: {error.message}") from None
+        except anthropic.APIStatusError as error:
+            raise ModelError(f"Anthropic returned an error ({error.status_code}).") from None
+        except anthropic.APIConnectionError:
+            raise ModelError("Could not reach Anthropic. Check the connection.") from None
+        if response.stop_reason == "refusal":
+            raise ModelError("Claude declined to answer this request.")
+        text = "".join(block.text for block in response.content if block.type == "text")
+        if not text.strip():
+            raise ModelError("Claude ran out of room before answering. Try again."
+                             if response.stop_reason == "max_tokens"
+                             else "Claude sent an empty answer. Try again.")
+        self.turns.append((text, response.content))
+        return text
 
 
-def handoff_dir():
-    return store.runtime_dir() / "handoff"
+def claude_client(model: str = "") -> ClaudeClient:
+    key = keychain.get_key("anthropic")
+    if not key:
+        raise ModelError("Add an Anthropic API key in settings before training a gesture.")
+    return ClaudeClient(key, model)
 
 
 def default_client(model: str = "") -> FireworksClient:

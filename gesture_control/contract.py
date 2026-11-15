@@ -13,18 +13,25 @@ saving of `settings_changed`. It also sends the events `armed_changed`,
 
 Events (back end -> UI)
 -----------------------
-tracker_status     fps, visible (list of part names), speed, camera_ok
-match              gesture (name), ms
+tracker_status     fps, visible (list of part names), speed, camera_ok; live (while
+                   recognition runs: windows checked in its last look, and ms it took)
+match              gesture (name), id, ms; test is true in test mode (set_testing),
+                   when the match is only shown and no action runs
 training_prompt    phase, count, index, asked, budget, ready (the countdown before
-                   a sample: 1, 2, then 0 when it is time to perform the motion)
+                   a sample: 1, 2, then 0 when it is time to perform the motion),
+                   back (restart_sample would now redo the sample before this one)
 training_progress  round, phase; while the agent works also step (the number of the
                    model call now running) and note (what the previous one led to)
 training_sample    index, count, phase, fps, frames (a short video of the sample the
                    user just performed: JPEG images as base64 text, not mirrored)
-training_review    phase, count, asked, budget (the batch is complete: the user
-                   checks the videos, re-records any, then submits)
-training_result    passed, summary, message, parts, code
-action_result      ok, message, gesture (name)
+training_review    phase, count, asked, budget, more (the batch is complete: the
+                   user checks the videos, re-records any, adds samples while
+                   `more` is true, then submits)
+training_result    passed, summary, message, parts, code, action (the planned action,
+                   in the stored format; the user may change it before saving),
+                   retry (false when trying again would fail the same way)
+action_result      ok, message, gesture (name); run_now is true when it answers
+                   run_script
 
 Not in the original table, added because the screens need them:
 
@@ -40,7 +47,11 @@ start_training     name, action_text, motion_text, gesture_id (None for a new on
 cancel_training
 submit_samples     (the videos look right: hand the batch to the agent)
 rerecord_sample    index (None for the whole batch)
-save_gesture
+add_sample         (on the review page: record one more sample for this batch)
+restart_sample     (while samples are being taken: during a countdown, go back to
+                   the sample just recorded when the prompt said back; once
+                   recording has begun, take this one again. From the countdown)
+save_gesture       action (optional: the user's choice instead of the planned one)
 delete_gesture     gesture_id
 test_action        gesture_id
 connect_chrome
@@ -50,6 +61,38 @@ Added:
 settings_changed   settings (dict)
 record_idle        on
 delete_idle_video  clip_id
+
+For the action screens (file 04). A script action from a window carries the
+script's text in "code"; the engine writes the file.
+
+set_action         gesture_id, action (replace a saved gesture's action)
+set_testing        on. Test mode: recognition keeps running for every gesture,
+                   armed or paused, but no action fires; each match comes back
+                   with test set. Ends when the window that asked goes away
+run_script         action, gesture_id (None while training: the gesture in training).
+                   "Run now": runs the script as typed, once, without saving it
+
+For the data dashboard (the Re-train button on a gesture's card):
+
+update_gesture     gesture_id, and any of: motion (the description), notes (what
+                   the user adds about how the gesture should work; the agent reads
+                   it as part of the specification), remove (positions of saved
+                   samples to drop) with count (how many samples the window saw).
+                   The function is not rewritten: this applies at the next training.
+                   Also complements (ids of the gestures that complement this
+                   one, both ways; saved as "complements" on each gesture): when
+                   one of a pair fires, the other cannot for the next 5 seconds.
+                   This one applies at once
+
+Answered by `server.py`, with data in the reply:
+
+gesture_data       gesture_id -> motion, notes, code, samples (one per saved positive:
+                   seconds, lead, aspect, frames of {t, points: {part: [x, y]}})
+
+action_info        gesture_id (optional) -> catalog, hardcoded, default_dir, code, log,
+                   shell_name
+check_action       action, gesture_id (optional) -> action (clean), summary, confirm,
+                   and for a script: command, working_dir
 """
 
 from __future__ import annotations
@@ -66,9 +109,10 @@ EVENTS = frozenset({
 
 COMMANDS = frozenset({
     "set_armed", "start_training", "cancel_training", "save_gesture",
-    "submit_samples", "rerecord_sample",
+    "submit_samples", "rerecord_sample", "restart_sample", "add_sample",
     "delete_gesture", "test_action", "connect_chrome",
     "settings_changed", "record_idle", "delete_idle_video",
+    "set_action", "run_script", "set_testing", "update_gesture",
 })
 
 PHASES = ("collecting", "testing", "revising", "redoing")

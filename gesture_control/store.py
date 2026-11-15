@@ -60,7 +60,8 @@ class Settings:
     mirror: bool = True
     show_points: bool = True
     model_name: str = ""
-    writer: str = "fireworks"           # who writes gesture functions: "fireworks" or "chat"
+    writer: str = "fireworks"           # who writes gesture functions: "fireworks" or "claude"
+                                        # (the Anthropic API)
     start_on_login: bool = False
     run_in_background: bool = True     # off: the engine quits when the last window closes
     first_run_done: bool = False

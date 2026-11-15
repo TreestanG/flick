@@ -286,6 +286,39 @@ def test_detector_cooldown_and_bad_functions():
     assert detector_with({"crash": crash}).on_segment(motion(0.3)) is None
 
 
+def test_a_gesture_silences_its_complements_for_five_seconds():
+    detector = Detector(cooldown_ms=800)
+    codes = {"right": swipe_code(), "left": LEFT_CODE}
+    detector.load([{"id": "right", "complements": ["left"]},
+                   {"id": "left", "complements": ["right"]}], read=codes.get)
+    assert detector.on_segment(motion(0.3, t0=0.0)) == "right"      # ended at 0.63
+    assert detector.on_segment(motion(-0.3, t0=2.0)) is None        # the hand coming back
+    assert detector.why == "its complement just triggered"
+    assert detector.on_segment(motion(0.3, t0=3.0)) == "right"      # itself is not silenced
+    assert detector.on_segment(motion(-0.3, t0=7.0)) is None        # 5 s from the later one
+    assert detector.on_segment(motion(-0.3, t0=9.0)) == "left"
+    assert detector.on_segment(motion(0.3, t0=11.0)) is None        # and the other way round
+    plain = detector_with(codes)                                    # not a pair: no wait
+    assert plain.on_segment(motion(0.3, t0=0.0)) == "right"
+    assert plain.on_segment(motion(-0.3, t0=2.0)) == "left"
+
+
+def test_complements_are_kept_both_ways(request):
+    backend = request.getfixturevalue("backend")                    # defined further down
+    backend.gestures = [{"id": i, "name": i, "action": {"kind": "none"}} for i in "abc"]
+    pairs = lambda: {g["id"]: g.get("complements") for g in store.load_gestures()}
+    backend._cmd_update_gesture("a", complements=["b", "a", "nope", "b"])
+    assert pairs() == {"a": ["b"], "b": ["a"], "c": None}
+    assert backend.detector.complements["b"] == {"a"}
+    backend._cmd_update_gesture("a", complements=["c"])
+    assert pairs() == {"a": ["c"], "b": None, "c": ["a"]}
+    backend._cmd_update_gesture("a", notes="unrelated")             # left alone when not sent
+    assert pairs()["a"] == ["c"]
+    backend._cmd_delete_gesture("a")
+    assert pairs() == {"b": None, "c": None}
+    backend.stop()
+
+
 # trainer ----------------------------------------------------------------
 
 class Scripted:
@@ -323,6 +356,7 @@ def make(client, user=None, negatives=60, **kwargs):
     user = user or User()
     kwargs.setdefault("evaluate", sandbox.evaluate_in_process)
     kwargs.setdefault("first_batch", 0)         # small batches keep these tests short
+    kwargs.setdefault("user_negatives", 0)      # the test user performs only the gesture
     return trainer.Trainer(client, "swipe my right index finger to the right",
                            NegativePool(everyday(negatives), seed=1), user.collect,
                            **kwargs), user
@@ -394,6 +428,14 @@ def test_training_passes_and_fresh_samples_stay_hidden_until_tested():
     assert "4 of 40 (36 remain)" in client.calls[1][-1]["content"]
 
 
+def test_notes_reach_the_model_with_the_description():
+    client = Scripted("REQUEST 4", block(swipe_code()), "TEST 5", "CONFIDENT")
+    run, _ = make(client, notes="the other fingers stay curled")
+    assert run.run().passed
+    first = client.calls[0][-1]["content"]
+    assert "swipe my right index finger" in first and "the other fingers stay curled" in first
+
+
 def test_confident_needs_a_clean_test_and_enough_fresh_data():
     client = Scripted("CONFIDENT", "REQUEST 3", "CONFIDENT", "TEST 3", block(swipe_code()),
                       "CONFIDENT", "TEST 3", "CONFIDENT", "TEST 3", "CONFIDENT")
@@ -427,12 +469,14 @@ def test_budget_is_a_hard_cap():
     assert [count for count, _ in user.asked] == [7]            # clamped to what is left
 
 
-def test_first_request_collects_at_least_ten():
-    client = Scripted("REQUEST 3", block(swipe_code()), "TEST 5", "CONFIDENT")
+def test_first_ten_are_collected_before_the_model_is_asked():
+    client = Scripted(block(swipe_code()), "TEST 5", "CONFIDENT")
     run, user = make(client, first_batch=trainer.FIRST_BATCH)
     assert run.run().passed and trainer.FIRST_BATCH == 10
     assert user.asked == [(10, "collecting"), (5, "testing")] and len(run.negatives) == 45
-    assert "always collects 10" in client.calls[0][0]["content"]
+    assert len(client.calls) == 3               # no call spent on asking for the first batch
+    assert "collects the first 10 itself" in client.calls[0][0]["content"]
+    assert "Collected 10 new positives" in client.calls[0][-1]["content"]
 
 
 def test_gives_up_after_too_many_replies_in_a_round():
@@ -447,7 +491,7 @@ def test_asks_for_more_idle_video_when_negatives_run_out():
     run, _ = make(client, negatives=12)
     result = run.run()
     assert not result.passed and "idle video" in result.message
-    assert trainer.minimum_negatives(3) == 45
+    assert trainer.minimum_negatives(3) == trainer.FEWEST_NEGATIVES
 
 
 # model client -------------------------------------------------------------
@@ -467,38 +511,6 @@ def test_fireworks_client_names_and_errors(monkeypatch):
         model_client.default_client()
 
 
-def test_chat_client_hands_questions_over_through_a_folder(tmp_path):
-    import json
-    from gesture_control.model_client import ChatClient
-    client = ChatClient(tmp_path, wait=5)
-    client.POLL_S = 0.02
-    got = []
-    asker = threading.Thread(target=lambda: got.append(
-        client.complete([{"role": "system", "content": "rules"},
-                         {"role": "user", "content": "Start by requesting samples."}])))
-    asker.start()
-    request = tmp_path / "request.json"
-    end = time.monotonic() + 3
-    while not request.exists() and time.monotonic() < end:
-        time.sleep(0.01)
-    asked = json.loads(request.read_text(encoding="utf-8"))
-    assert asked["step"] == 1 and asked["messages"][-1]["content"] == "Start by requesting samples."
-    (tmp_path / "reply.json").write_text(json.dumps(          # an answer to another question
-        {"run": asked["run"], "step": 9, "text": "CONFIDENT"}), encoding="utf-8")
-    time.sleep(0.1)
-    assert asker.is_alive() and not got
-    (tmp_path / "reply.json").write_text(json.dumps(
-        {"run": asked["run"], "step": 1, "text": "REQUEST 10"}), encoding="utf-8")
-    asker.join(3)
-    assert got == ["REQUEST 10"] and not request.exists() and not (tmp_path / "reply.json").exists()
-
-    quiet = ChatClient(tmp_path, wait=0.2)
-    quiet.POLL_S = 0.02
-    with pytest.raises(ModelError, match="did not answer"):
-        quiet.complete([{"role": "user", "content": "hello?"}])
-    assert not request.exists()
-
-
 # back end -----------------------------------------------------------------
 
 @pytest.fixture
@@ -507,6 +519,7 @@ def backend(tmp_path, monkeypatch):
     from gesture_control.backend import Backend, Training
     monkeypatch.setattr(Training, "STEP_S", 0.0)        # no waiting through the countdown
     monkeypatch.setattr(Training, "EARLY_S", 99.0)      # test motions have no real start time
+    monkeypatch.setattr(Training, "USER_NEGATIVES", 0)  # the test user performs only the gesture
     client = Scripted("REQUEST 3", block(swipe_code()), "TEST 5", "CONFIDENT")
     settings = store.Settings().to_dict()
     settings["detection"] = dict(DETECTION_DEFAULTS, cooldown_ms=0)
@@ -552,17 +565,17 @@ def test_train_save_recognise_and_delete(backend):
     assert "60 motions" in events(backend.bus, "idle_videos")[-1]["clips"][0]["name"]
 
     backend._cmd_start_training("Swipe right", "close the current tab", "swipe right")
-    assert backend._needed_parts() == P.ALL_PARTS
+    assert backend._needed_parts() == P.HAND_PARTS
     perform(backend)
     prompts = events(backend.bus, "training_prompt")
     result = backend.training.result
     assert result.passed and len(result.positives) == 15    # ten to learn from, five to test
     assert prompts[0] == {"phase": "collecting", "count": 10, "index": 0, "asked": 10,
-                          "budget": 40, "ready": 1}
+                          "budget": 40, "ready": 1, "back": False}
     assert [p["ready"] for p in prompts[:7]] == [1, 2, 0, 1, 2, 0, 1]   # 1, 2, go, per sample
     assert [p["index"] for p in prompts[:7]] == [0, 0, 0, 1, 1, 1, 2]
     assert prompts[-1] == {"phase": "testing", "count": 5, "index": 5, "asked": 15,
-                           "budget": 40, "ready": 0}
+                           "budget": 40, "ready": 0, "back": False}
     assert not backend.gestures                  # nothing is saved until the user says so
 
     backend._cmd_save_gesture()
@@ -582,6 +595,25 @@ def test_train_save_recognise_and_delete(backend):
     backend.armed = False
     backend._route(motion(0.3, t0=300), 300.9)
     assert not events(backend.bus, "match")
+
+    # The data dashboard: the description, notes and saved samples can be edited.
+    backend._cmd_update_gesture("swipe-right", motion="swipe right, fast",
+                                notes="only the index finger", remove=[0, 3], count=15)
+    saved = store.load_gestures()[0]
+    assert saved["motion"] == "swipe right, fast" and saved["notes"] == "only the index finger"
+    assert len(backend.dataset.positives("swipe-right")) == 13
+    backend._cmd_update_gesture("swipe-right", remove=[0], count=15)    # a stale list
+    assert len(backend.dataset.positives("swipe-right")) == 13
+    assert not events(backend.bus, "action_result")[-1]["ok"]
+    views = backend.dataset.sample_views("swipe-right")
+    assert len(views) == 13 and views[0]["lead"] == "right_hand" and views[0]["seconds"] > 0
+    assert "right_index_tip" in views[0]["frames"][0]["points"]
+    backend._cmd_start_training("Swipe right", "", "", "swipe-right")   # re-training reads them
+    assert backend.training.notes == "only the index finger"
+    assert backend.training.motion_text == "swipe right, fast" and len(backend.training.seed) == 13
+    backend._cmd_cancel_training()
+    backend._cmd_update_gesture("swipe-right", notes="")
+    assert "notes" not in store.load_gestures()[0]
 
     backend._cmd_delete_gesture("swipe-right")
     assert not store.load_gestures() and store.load_code("swipe-right") is None

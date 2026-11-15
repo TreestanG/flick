@@ -23,6 +23,7 @@ and at most `BUDGET` positives are ever asked of the user.
 
 from __future__ import annotations
 
+import math
 import re
 import statistics
 import time
@@ -41,11 +42,11 @@ REDO_MAX = 15               # samples the agent may ask the user to perform agai
 CALLS_PER_ROUND = 12        # model calls (code and STATS) between two sample collections
 MIN_FRESH_POSITIVES = 5     # across all test rounds
 MIN_FRESH_NEGATIVES = 15
+USER_NEGATIVES = 0.5        # negatives the user performs, per positive in the same batch
 
 NOT_PASSED = ("Couldn't tell this gesture apart from your other movements. "
               "Try a more distinctive motion.")
-MORE_IDLE = ("Ran out of recorded everyday motions to test against. Record more idle video "
-             "in settings, moving around as you normally do, then try again.")
+FEWEST_NEGATIVES = 5        # with fewer recorded everyday motions a run does not start
 
 
 class Cancelled(Exception):
@@ -59,12 +60,14 @@ class Result:
     code: str = ""
     needs: tuple = ()
     positives: list = field(default_factory=list)      # every positive the user performed
+    retry: bool = True              # False when trying again would fail the same way
 
 
 def minimum_negatives(ratio: int) -> int:
-    """The fewest negatives a run can succeed with: the first training batch
-    plus the fresh ones the finish rule asks for."""
-    return FIRST_BATCH * ratio + MIN_FRESH_NEGATIVES
+    """The fewest negatives a run starts with. It is checked before the user
+    performs anything. A run that uses up the negatives part way goes on
+    without more of them; it is never stopped for that."""
+    return FEWEST_NEGATIVES
 
 
 # what the model reads ----------------------------------------------------
@@ -277,10 +280,14 @@ where nothing moves, and for random positions.
 WHAT MAKES A GOOD FUNCTION
 
 - It runs on every motion the user makes all day. Negatives are the user's other gestures \
-and their everyday movements. A false trigger is worse than a miss, but it must still \
+and their everyday movements, plus a few motions in every batch that the user performed on \
+purpose as not the gesture (near misses; they come first in each batch of negatives). A false trigger is worse than a miss, but it must still \
 accept the user's natural variation.
-- Work mostly from the user's description: write the function it implies. You never see \
-the samples themselves. After each batch you get a short overview (which parts are visible \
+- The user's description is the specification. The function must check every thing it \
+names: which fingers or parts move, which way, what the other fingers do ("stay curled", \
+"spread"), where the hand is relative to the face. Check each of them in the code even if \
+the samples could be told apart without it; a function that only fits the samples will \
+fire on other motions. You never see the samples themselves. After each batch you get a short overview (which parts are visible \
 and how far they move, positives against negatives), and the app tests every function you \
 write on all the samples and tells you which ones it got wrong.
 - Use STATS when you need a number: where a part is on average over the motion, how far it \
@@ -289,8 +296,16 @@ moves, how far two parts are from each other. Ask about a few parts at a time.
 direction, how far in hand or head sizes, where it is relative to another part, how long.
 - Put thresholds in the gap between positives and negatives, not at the edge of the \
 positives.
-- People describe motions loosely. If the statistics disagree with the description, trust \
-the statistics and say so when you finish.
+- The user will perform the gesture faster and slower than in the samples. Judge its \
+shape, direction and distance, at fractions of the motion rather than at fixed times, and \
+do not put tight limits on its length or speed: allow at least from half to twice the \
+lengths you saw.
+- Statistics are for setting thresholds and for learning how the tracker sees what the \
+user described, not for deciding what the gesture is. The tracker's left and right, and \
+the sign of x, may be the opposite of the user's words (the camera faces them): use the \
+overview to find which tracked hand and which direction the description corresponds to, \
+and say so in your NOTE. Only when a named element is truly absent from every positive \
+(for example a finger that never moves) leave it out, and say that too.
 
 HOW TO REPLY
 
@@ -299,7 +314,7 @@ Each reply must contain exactly one action:
 REQUEST k
     Ask the user to perform the motion k more times ({K_MIN} to {K_MAX}). You also get \
 about 3k negatives. These are training samples. You get an overview of them, not the \
-samples. The first request always collects {FIRST_BATCH}, whatever k you give.
+samples. The app collects the first {FIRST_BATCH} itself, before your first reply.
 STATS part [part ...] [FOR label ...]
     Statistics about the training samples for up to {STATS_PARTS} parts, for example \
 `STATS right_index_tip nose`: each part's average position at five moments of the motion, \
@@ -380,8 +395,12 @@ class Trainer:
                  progress=lambda round, phase: None, ratio: int = 3, budget: int = BUDGET,
                  evaluate=sandbox.evaluate, first_batch: int = FIRST_BATCH,
                  on_step=lambda step, note: None, trace=lambda line: None,
-                 replaced=lambda old: None):
+                 replaced=lambda old: None, seed=(), seed_code: str = "",
+                 user_negatives: float = USER_NEGATIVES, notes: str = ""):
+        self.notes = notes.strip()      # what the user added about how it should work
+        self.user_negatives = max(0.0, user_negatives)
         self.first_batch = first_batch
+        self.seed, self.seed_code = list(seed), seed_code   # from an earlier training of it
         self.replaced = replaced        # told which samples were dropped for new ones
         self.redone = 0
         self.on_step, self.trace = on_step, trace
@@ -409,8 +428,9 @@ class Trainer:
         return self.budget - self.asked
 
     def _enough_fresh(self) -> bool:
+        # Once the negatives are used up there are no fresh ones to ask for.
         return (self.fresh_positives >= MIN_FRESH_POSITIVES
-                and self.fresh_negatives >= MIN_FRESH_NEGATIVES)
+                and (self.fresh_negatives >= MIN_FRESH_NEGATIVES or not len(self.pool)))
 
     def _status(self) -> str:
         lines = [f"Samples asked of the user: {self.asked} of {self.budget} "
@@ -484,8 +504,15 @@ class Trainer:
         self.calls = 0
         first_p, first_n = len(self.positives) + 1, len(self.negatives) + 1
         positives = [(f"P{first_p + i}", s) for i, s in enumerate(segments)]
-        negatives = [(f"N{first_n + i}", s)
-                     for i, s in enumerate(self.pool.take(self.ratio * len(segments)))]
+        # The user also performs motions that are not the gesture: near misses
+        # and things they do not want it to fire on. Recorded everyday motions
+        # cannot show where the gesture ends as well as those can.
+        mine = []
+        wanted = math.ceil(self.user_negatives * len(segments))
+        if wanted:
+            mine = self.collect(wanted, "negatives", self.asked - wanted, self.budget)
+        drawn = self.pool.take(self.ratio * len(segments))
+        negatives = [(f"N{first_n + i}", s) for i, s in enumerate(mine + drawn)]
         return positives, negatives
 
     def _redo(self, words: str) -> str:
@@ -618,16 +645,50 @@ class Trainer:
             return None
         if self.remaining < K_MIN:
             return NOT_PASSED               # no samples left to pass a fresh test with
-        if not len(self.pool) and self.fresh_negatives < MIN_FRESH_NEGATIVES:
-            return MORE_IDLE
         if self.calls >= CALLS_PER_ROUND:
             return NOT_PASSED
         return None
 
     def run(self) -> Result:
         """Raises Cancelled, or ModelError if the model cannot be reached."""
-        text = (f'The user describes the motion as: "{self.motion_text}"\n\n'
-                "Start by requesting training samples.")
+        brief = f'The user describes the motion as: "{self.motion_text}"'
+        if self.notes:
+            # Typed on the data dashboard: as binding as the description.
+            brief += ("\n\nThe user adds this about how the gesture should work. It is part "
+                      f"of the specification, like the description:\n{self.notes}")
+        text = brief + "\n\nStart by requesting training samples."
+        if not self.seed and self.first_batch >= K_MIN:
+            # The size of the first batch is fixed, so the model has nothing to
+            # decide: asking it first only made the user wait before the first
+            # countdown. The run opens with the collection instead.
+            text = (brief + "\n\nThe app has already collected the first training samples.\n\n"
+                    + self._request(self.first_batch))
+        if self.seed:
+            # Re-training: what the gesture was trained on before stays, and
+            # new samples are added to it. One negative per saved positive is
+            # enough here; the rest of the pool is kept for the new batches.
+            self.positives = [(f"P{i + 1}", s) for i, s in enumerate(self.seed)]
+            self.negatives = [(f"N{i + 1}", s)
+                              for i, s in enumerate(self.pool.take(len(self.seed)))]
+            text = (f"{brief}\n\n"
+                    f"This gesture was trained before. The {len(self.positives)} positives it "
+                    f"was trained on ({_labels(self.positives)}) are training samples already, "
+                    f"with {len(self.negatives)} negatives. The user wants to add more.")
+            if self.seed_code:
+                text += (f"\n\nIts current function:\n```python\n{self.seed_code}```\n\n"
+                         + self._try_code(self.seed_code).replace("That function",
+                                                                  "The current function"))
+            # No model call to ask for samples, and none to write a function
+            # that already fits: the run opens with the next collection. A
+            # function that fits what it was trained on goes straight to a
+            # fresh test; otherwise more training samples come first.
+            if self.passing:
+                text += (f"\n\n{overview(self.positives, self.negatives)}\n\n"
+                         "The app has already tested the current function on fresh samples.\n\n"
+                         + self._test(MIN_FRESH_POSITIVES))
+            else:
+                text += ("\n\nThe app has already collected more training samples.\n\n"
+                         + self._request(MIN_FRESH_POSITIVES))
         while True:
             problem = self._stuck()
             if problem:

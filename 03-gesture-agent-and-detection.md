@@ -99,7 +99,7 @@ The agent chooses how many samples to ask for. Each request is "k positives plus
 The agent uses open models hosted on Fireworks, through its OpenAI-compatible API.
 
 - **Key:** the user pastes their own Fireworks API key in settings. The UI sends it to the engine once over the local socket and does not keep it. The engine stores it in the OS keychain (`keyring`), never in config files, and only ever sends back a masked form.
-- **Claude Code instead of a hosted model:** a setting. The same questions go to a folder on disk and an open Claude Code session answers them, one action per reply. It needs no key and works only while that session is open.
+- **Claude through the Anthropic API:** a setting, with the user's own Anthropic API key (not a Claude.ai plan), stored the same way as the Fireworks key. The same text goes out: the user's sentences and statistics about body-part numbers.
 - **Client:** one `ModelClient` interface with a single `complete(messages) -> text` method. Fireworks is the only backend for now. A small interface means another provider can be added later without touching the trainer.
 - **Why not sign in with a Claude plan:** Anthropic's terms do not allow third-party apps to sign users in with Claude.ai plans or route requests through plan credentials, so it is not part of this design.
 - **Function writing:** ask for plain text with one Python code block and extract it. This works on any model and does not depend on native tool calling.

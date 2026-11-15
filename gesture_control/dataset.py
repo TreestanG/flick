@@ -35,6 +35,21 @@ def segment_from_dict(raw: dict) -> Segment:
                    raw.get("lead", ""))
 
 
+def sample_view(segment: Segment) -> dict:
+    """One sample for a window to draw: its length, which group moved, and
+    where each visible part is in every frame. No video is kept of a saved
+    sample, so the tracked points are all there is to show."""
+    frames = segment.frames
+    t0 = frames[0].t if frames else 0.0
+    return {"seconds": round(frames[-1].t - t0, 2) if frames else 0.0,
+            "lead": segment.lead,
+            "aspect": round(frames[0].aspect, 3) if frames else 1.0,
+            "frames": [{"t": round(f.t - t0, 3),
+                        "points": {name: [round(p.x, 4), round(p.y, 4)]
+                                   for name, p in f.parts.items() if p.state != P.NOT_VISIBLE}}
+                       for f in frames]}
+
+
 def _read(path: Path) -> list[dict]:
     try:
         with open(path, encoding="utf-8") as file:
@@ -79,25 +94,25 @@ class Dataset:
     def positives(self, gesture_id: str) -> list[Segment]:
         return [segment_from_dict(raw) for raw in _read(self._gesture_path(gesture_id))]
 
-    # samples performed for a gesture that is not saved yet -----------------
+    def remove_positives(self, gesture_id: str, indices) -> int:
+        """Drop saved positives by position (the data dashboard). Returns how
+        many are left."""
+        gone = set(indices)
+        kept = [raw for i, raw in enumerate(_read(self._gesture_path(gesture_id)))
+                if i not in gone]
+        self.save_positives(gesture_id, [segment_from_dict(raw) for raw in kept])
+        return len(kept)
 
-    def _pending_path(self, gesture_id: str) -> Path:
-        return self.root / "in_progress" / f"{gesture_id}.jsonl"
+    def sample_views(self, gesture_id: str) -> list[dict]:
+        """The saved positives as the data dashboard draws them."""
+        return [sample_view(segment) for segment in self.positives(gesture_id)]
 
-    def set_pending(self, gesture_id: str, segments) -> None:
-        """Keep samples the user performed in training, so a run that fails
-        or is cancelled does not make them perform the motion all over again."""
-        path = self._pending_path(gesture_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as file:
-            for segment in segments:
-                file.write(json.dumps(segment_to_dict(segment)) + "\n")
-
-    def pending(self, gesture_id: str) -> list[Segment]:
-        return [segment_from_dict(raw) for raw in _read(self._pending_path(gesture_id))]
+    # left over from unsaved runs --------------------------------------------
 
     def clear_pending(self, gesture_id: str) -> None:
-        self._pending_path(gesture_id).unlink(missing_ok=True)
+        """Remove the samples an older version kept from a run that was not
+        saved. Nothing writes these files any more."""
+        (self.root / "in_progress" / f"{gesture_id}.jsonl").unlink(missing_ok=True)
 
     def delete_gesture(self, gesture_id: str) -> None:
         self._gesture_path(gesture_id).unlink(missing_ok=True)

@@ -179,6 +179,8 @@ pub fn run() {
     tauri::Builder::default()
         // A second launch (for example "Open window" in the tray) shows this one.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // The folder picker for a custom script's working folder (file 04).
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             remember_ui_path();
             Ok(())

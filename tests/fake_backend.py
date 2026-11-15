@@ -197,6 +197,18 @@ class FakeBackend:
         self.gestures = [g for g in self.gestures if g["id"] != gesture_id]
         self.bus.emit("gestures_changed", gestures=list(self.gestures))
 
+    def _cmd_update_gesture(self, gesture_id: str, motion=None, notes=None, remove=(),
+                            count=None, complements=None) -> None:
+        for gesture in self.gestures:
+            if gesture["id"] == gesture_id:
+                if complements is not None:
+                    gesture["complements"] = list(complements)
+                if motion:
+                    gesture["motion"] = motion
+                if notes is not None:
+                    gesture["notes"] = notes
+        self.bus.emit("gestures_changed", gestures=list(self.gestures))
+
     def _cmd_test_action(self, gesture_id: str) -> None:
         for gesture in self.gestures:
             if gesture["id"] == gesture_id:
@@ -293,7 +305,16 @@ class FakeBackend:
     def _ask_review(self) -> None:
         tr = self._training
         self.bus.emit("training_review", phase=tr["phase"], count=tr["count"],
-                      asked=tr["asked"], budget=BUDGET)
+                      asked=tr["asked"], budget=BUDGET, more=tr["asked"] < BUDGET)
+
+    def _cmd_add_sample(self) -> None:
+        tr = self._training
+        if tr and tr.get("waiting") and tr["asked"] < BUDGET:
+            tr["count"] += 1
+            tr["asked"] += 1
+            tr["index"] = tr["count"]
+            self._sample(tr["count"] - 1)
+            self._ask_review()
 
     def _cmd_submit_samples(self) -> None:
         tr = self._training

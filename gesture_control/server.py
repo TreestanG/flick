@@ -27,8 +27,9 @@ import traceback
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from . import autostart, keychain, preview, store
+from . import actions, autostart, keychain, preview, script_runner, store
 from .contract import Bus
+from .dataset import Dataset
 
 VERSION = 1
 HELLO_S = 2.0           # the first message must arrive within this
@@ -41,13 +42,19 @@ FORWARDED = {
     "cancel_training": ((), ()),
     "submit_samples": ((), ()),
     "rerecord_sample": ((), ("index",)),
-    "save_gesture": ((), ()),
+    "restart_sample": ((), ()),
+    "add_sample": ((), ()),
+    "save_gesture": ((), ("action",)),
+    "set_action": (("gesture_id", "action"), ()),
+    "run_script": (("action",), ("gesture_id",)),
+    "set_testing": (("on",), ()),
     "delete_gesture": (("gesture_id",), ()),
     "test_action": (("gesture_id",), ()),
     "connect_chrome": ((), ()),
     "record_idle": (("on",), ()),
     "delete_idle_video": (("clip_id",), ()),
     "start_training": (("name", "action_text", "motion_text"), ("gesture_id",)),
+    "update_gesture": (("gesture_id",), ("motion", "notes", "remove", "count", "complements")),
 }
 
 
@@ -55,11 +62,14 @@ class CommandError(Exception):
     """A command that cannot be done; the text goes back to the window."""
 
 
-def api_key_info() -> dict:
-    """What a window may know about the key: never the key itself."""
-    value = keychain.get_key()
+def api_key_info(writer: str = "fireworks") -> dict:
+    """What a window may know about the key that the chosen writer needs:
+    never the key itself."""
+    provider = keychain.provider_for(writer)
+    value = keychain.get_key(provider)
     return {"present": bool(value), "masked": keychain.masked(value),
-            "from_env": keychain.from_env(), "env_var": keychain.ENV_VAR}
+            "from_env": keychain.from_env(provider), "env_var": keychain.env_var(provider),
+            "provider": provider, "name": keychain.PROVIDERS[provider][2]}
 
 
 class _Client:
@@ -105,6 +115,7 @@ class Server:
         self._on_armed = on_armed or (lambda armed: None)
         self._clients: set[_Client] = set()
         self._owner: _Client | None = None      # the window whose training is running
+        self._tester: _Client | None = None     # the window in test mode
         self._cache = {"gestures": [], "chrome_status": {"connected": False, "message": ""},
                        "idle_videos": [], "cameras": []}
         self._seen_window = False
@@ -234,7 +245,7 @@ class Server:
 
     def _snapshot(self) -> dict:
         return {"version": VERSION, "armed": self.armed, "settings": self.settings.to_dict(),
-                "api_key": api_key_info(),
+                "api_key": api_key_info(self.settings.writer),
                 "training": {"active": True} if self._owner else None, **self._cache}
 
     # one window ----------------------------------------------------------
@@ -284,6 +295,9 @@ class Server:
 
     def _left(self, client: _Client) -> None:
         self._clients.discard(client)
+        if self._tester is client:              # its test mode ends: actions fire again
+            self._tester = None
+            self.bus.send("set_testing", on=False)
         if self._owner is client:               # closing the window is Cancel (file 03)
             self._owner = None
             self.bus.send("cancel_training")
@@ -339,7 +353,9 @@ class Server:
             if self._owner not in (None, client):
                 raise CommandError("Another window is training a gesture.")
             self._owner = client
-        elif name in ("submit_samples", "rerecord_sample"):
+        elif name == "set_testing":
+            self._tester = client if data["on"] else None
+        elif name in ("submit_samples", "rerecord_sample", "restart_sample", "add_sample"):
             if self._owner is not client:
                 raise CommandError("This window is not training a gesture.")
         elif name in ("cancel_training", "save_gesture"):
@@ -379,21 +395,63 @@ class Server:
         settings = self.settings.to_dict()
         self.bus.send("settings_changed", settings=settings)
         self._broadcast("settings_changed", {"settings": settings})
+        if "writer" in changes:                 # another writer needs another key
+            self._broadcast("api_key", api_key_info(self.settings.writer))
         return {"settings": settings}
+
+    # the action screens (file 04): answered here, they only read ---------------
+
+    def _gesture(self, data: dict) -> dict | None:
+        wanted = data.get("gesture_id")
+        return next((g for g in self._cache["gestures"] if g.get("id") == wanted), None)
+
+    def _cmd_gesture_data(self, client, data) -> dict:
+        """What a saved gesture was trained on, for the data dashboard."""
+        gesture = self._gesture(data)
+        if gesture is None:
+            raise CommandError("There is no such gesture.")
+        return {"motion": gesture.get("motion", ""), "notes": gesture.get("notes", ""),
+                "code": store.load_code(gesture["id"]) or "",
+                "samples": Dataset().sample_views(gesture["id"])}
+
+    def _cmd_action_info(self, client, data) -> dict:
+        gesture = self._gesture(data)
+        return {"catalog": actions.catalog(),
+                "hardcoded": bool(gesture) and gesture["id"] in actions.HARDCODED,
+                **script_runner.info(gesture)}
+
+    def _cmd_check_action(self, client, data) -> dict:
+        """Check an edited action before it is saved, and say in plain words
+        what it will do, so the window can ask the user to confirm."""
+        gesture = self._gesture(data)
+        if gesture and gesture["id"] in actions.HARDCODED:
+            raise CommandError(actions.FIXED)
+        try:
+            clean = actions.check(data.get("action"))
+        except ValueError as problem:
+            raise CommandError(str(problem)) from None
+        reply = {"action": clean, "summary": actions.describe(clean),
+                 "confirm": actions.needs_confirmation(clean)}
+        if clean["kind"] == "script":
+            reply.update(script_runner.preview(gesture["id"] if gesture else None, clean))
+            reply["summary"] = f"Run a {clean['language']} script in {reply['working_dir']}"
+        return reply
 
     def _cmd_set_api_key(self, client, data) -> dict:
         key = data.get("key")
         if not isinstance(key, str) or not key.strip():
             raise CommandError("Paste a key first.")
-        return self._key_changed(keychain.set_key(key.strip()))
+        provider = keychain.provider_for(self.settings.writer)
+        return self._key_changed(keychain.set_key(key.strip(), provider))
 
     def _cmd_remove_api_key(self, client, data) -> dict:
-        return self._key_changed(keychain.delete_key())
+        provider = keychain.provider_for(self.settings.writer)
+        return self._key_changed(keychain.delete_key(provider))
 
     def _key_changed(self, error: str | None) -> dict:
         if error:
             raise CommandError(error)
-        info = api_key_info()
+        info = api_key_info(self.settings.writer)
         self._broadcast("api_key", info)
         return info
 

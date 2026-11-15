@@ -27,9 +27,12 @@ HEAD_HZ = 10.0
 
 
 class IdleGate:
-    """With no hand and no motion for a while, track only every third frame."""
+    """Knows when there has been no hand and no motion for a while. It can
+    then track only every `every`-th frame, but by default every frame is
+    still tracked: skipping made a hand that came into view already moving be
+    picked up late, and a fluid gesture lost its beginning."""
 
-    def __init__(self, idle_after: float = 2.0, every: int = 3):
+    def __init__(self, idle_after: float = 2.0, every: int = 1):
         self.idle_after, self.every = idle_after, every
         self._active_at = 0.0
 
