@@ -25,7 +25,7 @@ import threading
 import time
 import traceback
 
-from . import actions, planner
+from . import actions, claude_code, planner
 from . import parts as P
 from . import store
 from .camera import Camera, device_index, device_name, probe
@@ -33,15 +33,14 @@ from .chrome_bridge import ChromeBridge
 from .contract import Bus, PreviewFrame
 from .dataset import Dataset, NegativePool
 from .detector import Detector
-from .model_client import ModelError, claude_client, default_client
+from .model_client import ModelError, default_client
 from . import script_runner
 from .script_runner import ScriptRunner
-from .segmenter import Segment, Segmenter
+from .segmenter import CHECK_S, Segment, Segmenter
 from .tracker import IdleGate, Tracker
 from .trainer import Cancelled, Result, Trainer, minimum_negatives
 
 STATUS_S = 0.25
-CHECK_S = 0.1           # live recognition looks at most this often
 # Hands only. The face and pose models tripled the cost of every frame, and
 # the frame rate with them was too low. Head parts are never visible now.
 TRACKED = P.HAND_PARTS
@@ -284,10 +283,7 @@ class Training:
                 training = importlib.reload(training)
             except Exception:
                 traceback.print_exc()           # a broken edit: keep what was loaded
-            if self.settings.get("writer") == "claude":
-                client = clients.claude_client(self.settings.get("model_name", ""))
-            else:
-                client = clients.default_client(self.settings.get("model_name", ""))
+            client = clients.default_client(self.settings.get("model_name", ""))
         else:
             client = self.client_factory(self.settings.get("model_name", ""))
         log = store.runtime_dir() / "training.log"     # the last run, step by step
@@ -326,8 +322,7 @@ class Training:
         client = None
         if self.client_factory is default_client:
             try:
-                make = claude_client if self.settings.get("writer") == "claude"                     else default_client          # the same model that wrote the function
-                client = make(self.settings.get("model_name", ""))
+                client = default_client(self.settings.get("model_name", ""))
             except ModelError:
                 client = None
         try:
@@ -381,8 +376,12 @@ class Backend:
         if sys.platform == "darwin":
             self.camera.open()              # the permission prompt needs the main thread
         self._thread.start()
+        # The container Claude Code writes gesture functions in starts with
+        # the engine, so it is ready by the time a gesture is trained.
+        claude_code.start_in_background()
 
     def stop(self) -> None:
+        threading.Thread(target=claude_code.stop, name="claude-container-stop").start()
         if self.training:
             self.training.cancelled.set()
         self._stop.set()

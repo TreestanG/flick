@@ -13,7 +13,7 @@ from gesture_control import sandbox, store, trainer
 from gesture_control.contract import Bus
 from gesture_control.dataset import Dataset, NegativePool, segment_from_dict, segment_to_dict
 from gesture_control.detector import Detector
-from gesture_control.model_client import FireworksClient, ModelError
+from gesture_control.model_client import ModelError
 from gesture_control.segmenter import Segment
 from gesture_control.store import DETECTION_DEFAULTS
 
@@ -362,6 +362,55 @@ def make(client, user=None, negatives=60, **kwargs):
                            **kwargs), user
 
 
+def right_then_down() -> Segment:
+    """A swipe to the right that goes on downwards: as a whole not the gesture,
+    but its first half is one."""
+    first, second = motion(0.3, n=20), motion(dy=0.3, n=20, t0=20 / 30, seed=1)
+    frames = list(first.frames)
+    for frame in second.frames:
+        parts = {name: P.Part(p.x + 0.3, p.y, p.z, p.state) if name.startswith("right_") else p
+                 for name, p in frame.parts.items()}
+        frames.append(P.Frame(frame.t, 20 + frame.frame, (480, 480), parts, frame.derived))
+    return Segment(tuple(frames), 0.15, frames[-1].t, "right_hand")
+
+
+def test_cuts_are_the_stretches_the_live_loop_checks():
+    from gesture_control.segmenter import LOOK_BACK_S, Segmenter, cuts
+    frames = right_then_down().frames
+    found = cuts(frames)
+    assert found and (0, len(frames)) not in found          # the whole motion is the sample
+    assert all(0 <= a < b <= len(frames) and b - a >= 3 for a, b in found)
+    assert len(found) == len(set(found))
+    # The same stretches as the live segmenter gives when it is asked at the same moments.
+    live, seen, checked = Segmenter(DETECTION_DEFAULTS), set(), None
+    for count, frame in enumerate(frames, 1):
+        live.update(frame)
+        if count < len(frames) and checked is not None and frame.t - checked < 0.1:
+            continue
+        checked = frame.t
+        seen |= {(count - len(w.frames), count) for w in live.windows()}
+    assert set(found) == seen - {(0, len(frames))}
+    assert any(abs((frames[b - 1].t - frames[a].t) - LOOK_BACK_S[0]) < 0.05 for a, b in found)
+
+
+def test_a_negative_is_also_tested_in_the_stretches_the_live_loop_checks():
+    whole = right_then_down()
+    assert sandbox.run(sandbox.load(swipe_code()), whole.frames) is False
+    client = Scripted(block(swipe_code()))
+    run, _ = make(client)
+    positives = [(f"P{i + 1}", motion(0.3 + 0.01 * i, seed=i)) for i in range(3)]
+    for evaluate in (sandbox.evaluate_in_process, sandbox.evaluate):
+        run.evaluate = evaluate
+        mistakes, report = run._score(swipe_code(), positives, [("N1", motion(-0.3)), ("N2", whole)])
+        assert report.results == [True, True, True, False, False]
+        assert report.hits[:4] == [None] * 4 and report.hits[4]
+        assert len(mistakes) == 1 and mistakes[0].startswith(
+            "N2 is a negative but detect returned True on a part of it, from ")
+    # A function that also wants the hand to have stopped moving down passes.
+    start, end = report.hits[4]
+    assert sandbox.run(sandbox.load(swipe_code()), whole.frames[start:end]) is True
+
+
 def test_parse():
     assert trainer.parse("I need data.\nREQUEST 4") == ("request", 4)
     assert trainer.parse("**TEST 5**") == ("test", 5)
@@ -496,18 +545,12 @@ def test_asks_for_more_idle_video_when_negatives_run_out():
 
 # model client -------------------------------------------------------------
 
-def test_fireworks_client_names_and_errors(monkeypatch):
+def test_no_token_is_said_before_training(monkeypatch):
     from gesture_control import keychain, model_client
-    assert FireworksClient("k").model == model_client.DEFAULT_MODEL
-    assert FireworksClient("k", "glm-5p3").model == "accounts/fireworks/models/glm-5p3"
-    assert FireworksClient("k", "moonshotai/kimi-k3.1-pro").model == model_client.DEFAULT_MODEL
-    client = FireworksClient("k", base_url="http://127.0.0.1:9", timeout=2)
-    with pytest.raises(ModelError, match="reach"):
-        client.complete([{"role": "user", "content": "hi"}])
     monkeypatch.delenv(keychain.ENV_VAR, raising=False)
     monkeypatch.setattr(keychain, "_keyring", lambda: type("R", (), {
         "get_password": staticmethod(lambda service, account: None)}))
-    with pytest.raises(ModelError, match="API key"):
+    with pytest.raises(ModelError, match="setup-token"):
         model_client.default_client()
 
 
@@ -725,3 +768,54 @@ def test_cancel_saves_nothing(backend):
     assert not run.thread.is_alive() and run.result is None and backend.training is None
     backend._cmd_save_gesture()
     assert not events(backend.bus, "training_result") and store.load_gestures() == []
+
+
+# Claude Code in its container ---------------------------------------------
+
+def test_claude_code_client_copies_samples_and_pulls_the_function(monkeypatch):
+    """No Docker here: `_docker` is replaced and records what it was asked."""
+    import io
+    import json
+    import subprocess
+    import tarfile
+    from gesture_control import claude_code
+
+    calls, copied = [], {}
+    replies = iter(["I wrote it.\n\nCODE", "TEST 5"])
+
+    def docker(*args, data=None, timeout=60, env=None):
+        calls.append((args, env))
+        out = b""
+        if "tar" in args:
+            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+                for member in tar.getmembers():
+                    copied[member.name] = tar.extractfile(member).read()
+        elif "claude" in args:
+            out = json.dumps({"result": next(replies), "session_id": "s1"}).encode()
+        elif "cat" in args:
+            out = swipe_code().encode()
+        return subprocess.CompletedProcess(args, 0, out, b"")
+
+    monkeypatch.setattr(claude_code, "_docker", docker)
+    monkeypatch.setattr(claude_code, "start", lambda launch_docker=True: None)
+    client = claude_code.ClaudeCodeClient("the-token")
+    positives, negatives = [("P1", motion(0.3))], [("N1", motion(-0.3))]
+    client.sync(positives, negatives)
+    assert {"samples/positives/P1.json", "samples/negatives/N1.json", "tools/check.py",
+            "tools/gesture_control/sandbox.py"} <= set(copied)
+    assert len(json.loads(copied["samples/positives/P1.json"])["frames"]) == 20
+    copied.clear()
+    client.sync(positives + [("P2", motion(0.3, seed=2))], negatives)
+    assert set(copied) == {"samples/positives/P2.json"}             # only what is new
+
+    messages = [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "first"}]
+    reply = client.complete(messages)
+    assert trainer.parse(reply) == ("code", swipe_code().strip() + "\n")    # the pulled file
+    args, env = next(c for c in calls if "claude" in c[0])
+    assert env[claude_code.TOKEN_ENV] == "the-token" and "the-token" not in args
+    assert "--resume" not in args and "/work/detect.py" in args[args.index("--append-system-prompt") + 1]
+
+    messages += [{"role": "assistant", "content": reply}, {"role": "user", "content": "second"}]
+    assert trainer.parse(client.complete(messages)) == ("test", 5)
+    args, _ = [c for c in calls if "claude" in c[0]][-1]
+    assert args[args.index("--resume") + 1] == "s1"

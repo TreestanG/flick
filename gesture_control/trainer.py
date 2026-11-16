@@ -33,7 +33,7 @@ from . import parts as P
 from . import sandbox
 from .dataset import NegativePool
 from .model_client import ModelClient
-from .segmenter import Segment
+from .segmenter import Segment, cuts
 
 BUDGET = 40                 # positives asked of the user, in total
 K_MIN, K_MAX = 3, 10        # per request
@@ -257,6 +257,11 @@ counts.
 - Parts: {", ".join(P.ALL_PARTS)}.
 - Left and right are the person's own. x and y are fractions of the image (x to the right \
 as the camera sees it, y down, 0 to 1). The image is 4:3, so the helpers correct for that.
+- Live, the app does not wait for a motion to end. About ten times a second it calls detect \
+on stretches of the last few seconds that all end now: one from where the current motion \
+began, and ones of 0.4 to 3 s. So detect also sees motions half done, and the middle or the \
+end of a motion on its own. The app therefore runs every function you write on such \
+stretches of each negative as well, and a True on any of them is a mistake.
 - A part's state is "visible", "estimated" (top_of_head always is) or "not_visible". A part \
 that is not visible has no position: frame.part gives None and positions gives NaN. Your \
 function must handle that, and should return False when the parts it relies on are missing.
@@ -420,6 +425,7 @@ class Trainer:
         self.round = 0
         self.calls = 0                  # model calls since the last collection
         self.messages = [{"role": "system", "content": SYSTEM}]
+        self._cuts: dict = {}           # id of a negative -> the stretches of it to run as well
 
     # state -------------------------------------------------------------
 
@@ -462,6 +468,11 @@ class Trainer:
         self.messages.append({"role": "user", "content": text + "\n\n" + self._status()})
         started = time.monotonic()
         try:
+            # A writer that works on the samples themselves (Claude Code in
+            # its container) is given the training ones before each turn.
+            sync = getattr(self.client, "sync", None)
+            if sync:
+                sync(self.positives, self.negatives)
             reply = self.client.complete(self.messages)
         except Exception as error:
             self.trace(f"step {self.step}: failed after {time.monotonic() - started:.0f} s: {error}")
@@ -567,8 +578,17 @@ class Trainer:
         return stats(names, self.positives, self.negatives, picked)
 
     def _score(self, code: str, positives: list, negatives: list) -> tuple[list, object]:
-        """Run code on labelled samples. Returns (mistakes as text, the report)."""
-        report = self.evaluate(code, [s.frames for _, s in positives + negatives])
+        """Run code on labelled samples. Returns (mistakes as text, the report).
+
+        A negative is also run in pieces: the stretches the live loop would
+        have checked while that motion was happening. Live, the function
+        never gets a motion neatly cut out, so one that is right on a whole
+        negative can still fire half way through it."""
+        for _, segment in negatives:
+            if id(segment) not in self._cuts:
+                self._cuts[id(segment)] = cuts(segment.frames)
+        spans = [[] for _ in positives] + [self._cuts[id(s)] for _, s in negatives]
+        report = self.evaluate(code, [s.frames for _, s in positives + negatives], spans)
         if report.error:
             return [report.error], report
         mistakes = []
@@ -576,10 +596,19 @@ class Trainer:
             if result is not True:
                 mistakes.append(f"{label} is a positive but detect "
                                 + ("returned False" if result is False else f"failed ({result})"))
-        for (label, _), result in zip(negatives, report.results[len(positives):]):
+        hits = list(report.hits[len(positives):]) + [None] * len(negatives)
+        for (label, segment), result, hit in zip(negatives, report.results[len(positives):], hits):
             if result is not False:
                 mistakes.append(f"{label} is a negative but detect "
                                 + ("returned True" if result is True else f"failed ({result})"))
+            elif hit:
+                frames = segment.frames
+                t0 = frames[0].t
+                mistakes.append(
+                    f"{label} is a negative but detect returned True on a part of it, from "
+                    f"{frames[hit[0]].t - t0:.2f} s to {frames[hit[1] - 1].t - t0:.2f} s of "
+                    f"its {frames[-1].t - t0:.2f} s (the live loop checks such stretches "
+                    "while a motion is happening)")
         return mistakes + list(report.sanity), report
 
     def _try_code(self, code: str) -> str:

@@ -37,6 +37,7 @@ from . import parts as P
 
 ALLOWED_IMPORTS = ("numpy", "math")
 TIMEOUT_S = 15.0
+CUT_S = 0.005           # more time for each stretch of a segment that is run as well
 MEMORY_MB = 1024
 SLOW_MS = 50.0          # one call; the runtime budget is a few ms per function
 RANDOM_INPUTS = 8
@@ -365,6 +366,8 @@ class Report:
     results: list = field(default_factory=list)     # per segment: True, False or an error text
     sanity: list = field(default_factory=list)      # problems with empty/constant/random input
     slow_ms: float = 0.0            # the slowest single call
+    hits: list = field(default_factory=list)        # per segment: the first of its cuts that
+                                                    # gave True as [start, end], or None
 
     @property
     def ok(self) -> bool:
@@ -382,7 +385,7 @@ def _call(gesture: Gesture, frames) -> tuple:
     return result, (time.perf_counter() - started) * 1000
 
 
-def _evaluate_here(code: str, segments: list) -> dict:
+def _evaluate_here(code: str, segments: list, cuts=()) -> dict:
     try:
         gesture = load(code)
     except SandboxError as error:
@@ -392,6 +395,16 @@ def _evaluate_here(code: str, segments: list) -> dict:
         result, ms = _call(gesture, frames)
         results.append(result)
         slow = max(slow, ms)
+    hits = []
+    for frames, spans in zip(segments, cuts or ()):
+        hit = None
+        for start, end in spans:
+            result, ms = _call(gesture, frames[start:end])
+            slow = max(slow, ms)
+            if result is True:
+                hit = [start, end]
+                break
+        hits.append(hit)
     sanity, random_hits = [], 0
     for label, frames in sanity_inputs():
         result, ms = _call(gesture, frames)
@@ -409,17 +422,23 @@ def _evaluate_here(code: str, segments: list) -> dict:
     if slow > SLOW_MS:
         sanity.append(f"detect took {slow:.0f} ms on one input; it must stay under "
                       f"{SLOW_MS:.0f} ms")
-    return {"needs": list(gesture.needs), "results": results, "sanity": sanity, "slow_ms": slow}
+    return {"needs": list(gesture.needs), "results": results, "sanity": sanity, "slow_ms": slow,
+            "hits": hits}
 
 
-def evaluate(code: str, segments, timeout: float = TIMEOUT_S,
+def evaluate(code: str, segments, cuts=(), timeout: float | None = None,
              memory_mb: int = MEMORY_MB) -> Report:
     """Run `code` on each segment (a sequence of Frames) in a separate process,
-    along with the empty, constant and random inputs."""
+    along with the empty, constant and random inputs. `cuts` may give, for
+    each segment, the (start, end) stretches of it to run the function on as
+    well; `Report.hits` then says which of them, if any, returned True."""
     _, problems = check(code)
     if problems:
         return Report(error="; ".join(problems))
-    request = json.dumps({"code": code, "memory_mb": memory_mb,
+    cuts = [[list(span) for span in spans] for spans in cuts or ()]
+    if timeout is None:
+        timeout = TIMEOUT_S + CUT_S * sum(len(spans) for spans in cuts)
+    request = json.dumps({"code": code, "memory_mb": memory_mb, "cuts": cuts,
                           "segments": [[f.to_dict() for f in frames] for frames in segments]})
     env = {k: v for k, v in os.environ.items() if "KEY" not in k.upper()
            and "TOKEN" not in k.upper() and "SECRET" not in k.upper()}
@@ -442,13 +461,13 @@ def evaluate(code: str, segments, timeout: float = TIMEOUT_S,
 
 def _report(raw: dict) -> Report:
     return Report(raw.get("error", ""), tuple(raw.get("needs", ())), raw.get("results", []),
-                  raw.get("sanity", []), raw.get("slow_ms", 0.0))
+                  raw.get("sanity", []), raw.get("slow_ms", 0.0), raw.get("hits", []))
 
 
-def evaluate_in_process(code: str, segments) -> Report:
+def evaluate_in_process(code: str, segments, cuts=()) -> Report:
     """The same checks as `evaluate` without the separate process, timeout or
     memory limit. For functions that are already trusted, and for tests."""
-    return _report(_evaluate_here(code, [list(frames) for frames in segments]))
+    return _report(_evaluate_here(code, [list(frames) for frames in segments], cuts))
 
 
 def _limit_memory(mb: int) -> bool:
@@ -506,7 +525,7 @@ def _child() -> None:
     if not _limit_memory(request["memory_mb"]):
         print("warning: no memory limit on this platform", file=sys.stderr)
     segments = [[P.Frame.from_dict(f) for f in frames] for frames in request["segments"]]
-    out = _evaluate_here(request["code"], segments)
+    out = _evaluate_here(request["code"], segments, request.get("cuts", ()))
     sys.stdout.write(json.dumps(out))
 
 

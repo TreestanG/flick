@@ -24,6 +24,7 @@ LOST_S = 0.1          # the moving group may drop out this long before the motio
 MIN_SCALE = 0.02
 HISTORY_S = 5.0       # live: how far back frames are kept
 LOOK_BACK_S = (0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0)    # live: the stretches checked, ending now
+CHECK_S = 0.1         # live recognition looks at most this often
 # A motion has stopped when its speed is this small a share of the fastest it
 # reached. A fixed stop speed alone sits below the tracker's own jitter on some
 # cameras, so a hand held still after a motion never counted as stopped.
@@ -134,36 +135,26 @@ class Segmenter:
         items = list(self._history)
         if len(items) < 3:
             return []
-        now = items[-1][0].t
-        starts = []
-        peak = 0.0
-        for i in range(len(items) - 1, -1, -1):
-            speed = items[i][1]
-            if peak > 0 and speed <= END_SHARE * peak:
-                starts.append(i)
-                break
-            peak = max(peak, speed)
         times = [item[0].t for item in items]
-        for back in LOOK_BACK_S:
-            starts.append(bisect.bisect_left(times, now - back))
-            if times[0] > now - back:
-                break                       # the history is no longer than this
         found = []
-        for i in sorted(set(starts), reverse=True):
-            if len(items) - i < 3:
-                continue
+        for i in _starts(times, [item[1] for item in items]):
             fastest = max(range(i, len(items)), key=lambda j: items[j][1])
-            found.append(Segment(tuple(item[0] for item in items[i:]), times[i], now,
+            found.append(Segment(tuple(item[0] for item in items[i:]), times[i], times[-1],
                                  items[fastest][2]))
         return found
 
     # state machine -----------------------------------------------------
 
-    def update(self, frame: P.Frame) -> Segment | None:
+    def _note(self, frame: P.Frame) -> str:
+        """Take in one frame: the smoothed speed, and which group is moving."""
         raw, lead = self._measure(frame)
         dt = frame.t - self._last_t if self._last_t is not None else 0.0
         self._last_t = frame.t
         self.speed += (raw - self.speed) * (1 - math.exp(-dt / SMOOTH_S)) if dt > 0 else 0.0
+        return lead
+
+    def update(self, frame: P.Frame) -> Segment | None:
+        lead = self._note(frame)
         self._history.append((frame, self.speed, lead))
         while frame.t - self._history[0][0].t > HISTORY_S:
             self._history.popleft()
@@ -232,3 +223,51 @@ class Segmenter:
         self._frames = []
         self._buffer.clear()
         return None
+
+
+# the stretches live recognition checks -------------------------------------
+
+def _starts(times: list, speeds: list) -> list:
+    """Where the stretches that end at the newest frame begin, shortest first.
+    One goes back for as long as there has been motion; the others go back
+    the fixed lengths of LOOK_BACK_S, as far as there are frames."""
+    count, now = len(times), times[-1]
+    starts = []
+    peak = 0.0
+    for i in range(count - 1, -1, -1):
+        if peak > 0 and speeds[i] <= END_SHARE * peak:
+            starts.append(i)
+            break
+        peak = max(peak, speeds[i])
+    for back in LOOK_BACK_S:
+        starts.append(bisect.bisect_left(times, now - back))
+        if times[0] > now - back:
+            break                       # there are no frames further back than this
+    return [i for i in sorted(set(starts), reverse=True) if count - i >= 3]
+
+
+# `cuts` only follows the speed; the start and stop settings play no part in it.
+_NO_SETTINGS = {"start_speed": 0, "stop_speed": 0, "quiet_ms": 0, "min_dur_ms": 0, "max_dur_ms": 0}
+
+
+def cuts(frames, every: float = CHECK_S) -> list:
+    """The stretches of one recorded motion that live recognition would have
+    checked while it was happening, as (start, end) indexes into `frames`
+    (end not included). Live, `Segmenter.windows` is looked at every `every`
+    seconds, so a gesture function also sees a motion half done, and its
+    parts on their own. The whole motion is left out: that is the sample
+    itself. Frames from before the motion are not in a sample, so the longer
+    stretches stop at its first frame. All parts count towards the speed
+    here, as in training; live, only the parts the functions need do."""
+    watch = Segmenter(_NO_SETTINGS)
+    times, speeds, found = [], [], []
+    checked = None
+    for count, frame in enumerate(frames, 1):
+        watch._note(frame)
+        times.append(frame.t)
+        speeds.append(watch.speed)
+        if count < len(frames) and checked is not None and frame.t - checked < every:
+            continue
+        checked = frame.t
+        found += [(i, count) for i in _starts(times, speeds)]
+    return [cut for cut in dict.fromkeys(found) if cut != (0, len(frames))]
