@@ -20,6 +20,7 @@ DETECTION_DEFAULTS = {
     "min_dur_ms": 250,
     "max_dur_ms": 2500,
     "cooldown_ms": 800,
+    "complement_ms": 1500,      # after a gesture fires, its complements stay quiet this long
     "negatives_per_positive": 3,
 }
 

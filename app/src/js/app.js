@@ -21,11 +21,12 @@ const DETECTION = {   // key -> [label, whole number]
   min_dur_ms: ["Shortest motion (ms)", true],
   max_dur_ms: ["Longest motion (ms)", true],
   cooldown_ms: ["Cooldown after an action (ms)", true],
+  complement_ms: ["Quiet time for complementary gestures (ms)", true],
   negatives_per_positive: ["Negatives per positive sample", true],
 };
 const DETECTION_DEFAULTS = {
   start_speed: 1.2, stop_speed: 0.6, quiet_ms: 150, min_dur_ms: 250, max_dur_ms: 2500,
-  cooldown_ms: 800, negatives_per_positive: 3,
+  cooldown_ms: 800, complement_ms: 1500, negatives_per_positive: 3,
 };
 const CHECKLIST = [   // key, text, settings section, optional
   ["camera", "Allow camera access", "camera", false],
@@ -838,7 +839,8 @@ async function dataDashboard(gesture) {
         h("label", { text: "Complementary gestures" }),
         h("p", { class: "small", text: others.length
           ? "When this gesture triggers, the ones ticked here cannot trigger for the next " +
-            "5 seconds, and the other way round. Use it for pairs where the hand coming back " +
+            `${((state.settings.detection || {}).complement_ms || DETECTION_DEFAULTS.complement_ms) / 1000} ` +
+            "seconds, and the other way round (the time is in Settings). Use it for pairs where the hand coming back " +
             "from one looks like the other, such as swipe left and swipe right."
           : "There are no other gestures yet to pair this one with." }),
         others.length ? pairs : null),

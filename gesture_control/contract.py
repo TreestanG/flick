@@ -81,7 +81,7 @@ update_gesture     gesture_id, and any of: motion (the description), notes (what
                    The function is not rewritten: this applies at the next training.
                    Also complements (ids of the gestures that complement this
                    one, both ways; saved as "complements" on each gesture): when
-                   one of a pair fires, the other cannot for the next 5 seconds.
+                   one of a pair fires, the other cannot for a while (the complement_ms setting).
                    This one applies at once
 
 Answered by `server.py`, with data in the reply:

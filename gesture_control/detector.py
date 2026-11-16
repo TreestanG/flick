@@ -9,12 +9,13 @@ from . import sandbox, store
 from .segmenter import Segment
 
 
-COMPLEMENT_S = 5.0      # after a gesture fires, its complements stay quiet this long
+COMPLEMENT_MS = store.DETECTION_DEFAULTS["complement_ms"]
 
 
 class Detector:
-    def __init__(self, cooldown_ms: float = 800):
+    def __init__(self, cooldown_ms: float = 800, complement_ms: float = COMPLEMENT_MS):
         self.cooldown_s = cooldown_ms / 1000
+        self.complement_s = complement_ms / 1000    # a setting: how long complements stay quiet
         self.complements: dict[str, set[str]] = {}          # gesture id -> ids it silences
         self._blocked: dict[str, float] = {}                # gesture id -> silenced until
         self.gestures: dict[str, sandbox.Gesture] = {}     # gesture id -> loaded function
@@ -78,5 +79,5 @@ class Detector:
         self._quiet_until = segment.t1 + self.cooldown_s
         self._blocked.pop(found[0], None)
         for other in self.complements.get(found[0], ()):
-            self._blocked[other] = segment.t1 + COMPLEMENT_S
+            self._blocked[other] = segment.t1 + self.complement_s
         return found[0]

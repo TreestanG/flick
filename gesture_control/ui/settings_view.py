@@ -19,6 +19,7 @@ DETECTION_LABELS = {
     "min_dur_ms": "Shortest motion (ms)",
     "max_dur_ms": "Longest motion (ms)",
     "cooldown_ms": "Cooldown after an action (ms)",
+    "complement_ms": "Quiet time for complementary gestures (ms)",
     "negatives_per_positive": "Negatives per positive sample",
 }
 

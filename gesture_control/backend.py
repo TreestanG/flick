@@ -32,7 +32,7 @@ from .camera import Camera, device_index, device_name, probe
 from .chrome_bridge import ChromeBridge
 from .contract import Bus, PreviewFrame
 from .dataset import Dataset, NegativePool
-from .detector import Detector
+from .detector import COMPLEMENT_MS, Detector
 from .model_client import ModelError, default_client
 from . import script_runner
 from .script_runner import ScriptRunner
@@ -363,7 +363,8 @@ class Backend:
         self.settings = settings
         self.gestures = actions.apply_hardcoded(store.load_gestures())
         self.dataset = Dataset()
-        self.detector = Detector(settings["detection"]["cooldown_ms"])
+        self.detector = Detector(settings["detection"]["cooldown_ms"],
+                                 settings["detection"].get("complement_ms", COMPLEMENT_MS))
         self.detector.load(self.gestures)
         self.training: Training | None = None
         self.client_factory = client_factory
@@ -490,6 +491,7 @@ class Backend:
         self.settings.update(settings)      # in place: a running Training shares this dict
         self.segmenter.configure(settings["detection"])
         self.detector.cooldown_s = settings["detection"]["cooldown_ms"] / 1000
+        self.detector.complement_s = settings["detection"].get("complement_ms", COMPLEMENT_MS) / 1000
         self.camera.switch(device_index(settings.get("camera_device", "")))
 
     def _needed_parts(self) -> tuple:

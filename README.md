@@ -156,8 +156,8 @@ There is no fake mode: the app always uses the camera.
 - A hardcoded gesture's action cannot be changed in the editor; it says so.
 - **Complementary gestures:** in a gesture's data dialog (Re-train on its
   card) you can tick the gestures that complement it, such as swipe left for
-  swipe right. When one of a pair triggers, the other cannot for the next 5
-  seconds (`COMPLEMENT_S` in `detector.py`), so the hand coming back does not
+  swipe right. When one of a pair triggers, the other cannot for the next 1.5
+  seconds (the `complement_ms` detection setting), so the hand coming back does not
   fire the opposite gesture. The link goes both ways and is saved as
   `complements` on each gesture (`update_gesture`).
 - **Test mode:** one Test mode button beside New command, instead of a Test

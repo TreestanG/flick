@@ -286,8 +286,9 @@ def test_detector_cooldown_and_bad_functions():
     assert detector_with({"crash": crash}).on_segment(motion(0.3)) is None
 
 
-def test_a_gesture_silences_its_complements_for_five_seconds():
-    detector = Detector(cooldown_ms=800)
+def test_a_gesture_silences_its_complements_for_a_while():
+    assert Detector().complement_s == 1.5                           # the default of the setting
+    detector = Detector(cooldown_ms=800, complement_ms=5000)
     codes = {"right": swipe_code(), "left": LEFT_CODE}
     detector.load([{"id": "right", "complements": ["left"]},
                    {"id": "left", "complements": ["right"]}], read=codes.get)
