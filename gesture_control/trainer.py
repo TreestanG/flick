@@ -391,7 +391,9 @@ def parse(reply: str) -> tuple:
 class Trainer:
     """`collect(count, phase, asked, budget)` blocks until the user has
     performed `count` motions and returns them as Segments; it raises
-    Cancelled if the user gives up. `progress(round, phase)` reports what
+    Cancelled if the user gives up. For the phase "redoing" it also gets
+    `which` (the numbers of the positives being replaced, in order) and `of`
+    (how many positives there are). `progress(round, phase)` reports what
     the trainer is doing. `on_step(step, note)` is called before each model
     call with what the previous one led to, and `trace(line)` gets one line
     per step for a log."""
@@ -539,7 +541,10 @@ class Trainer:
             return (f"Only {REDO_MAX - self.redone} more samples can be performed again in "
                     "this run.")
         self.progress(max(self.round, 1), "redoing")
-        fresh = self.collect(len(labels), "redoing", self.asked - len(labels), self.budget)
+        # The user is told which of their samples each one replaces: its number,
+        # counted from the first positive.
+        fresh = self.collect(len(labels), "redoing", self.asked - len(labels), self.budget,
+                             which=[where[label] + 1 for label in labels], of=len(self.positives))
         old = []
         for label, segment in zip(labels, fresh):
             old.append(self.positives[where[label]][1])

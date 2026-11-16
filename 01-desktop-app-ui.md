@@ -246,7 +246,7 @@ Same names and contents as before.
 |---|---|
 | `tracker_status` | fps, which parts are visible, current motion speed, camera ok or not. Sent about 5 times a second |
 | `match` | gesture name, time taken in ms |
-| `training_prompt` | phase, how many samples to perform, index, samples asked so far, budget, and the ready countdown before a sample |
+| `training_prompt` | phase, how many samples to perform, index, samples asked so far, budget, and the ready countdown before a sample. When samples are being redone also `sample` (the number of the user's sample this one replaces), `of` (how many they have recorded) and `which` (all the numbers being redone) |
 | `training_progress` | round, phase |
 | `training_sample` (new) | index, count, phase, and a short video of the sample just performed: frames per second and a list of JPEG images as base64 text |
 | `training_review` (new) | phase, count, samples asked so far, budget. The batch is complete and waits for the user |

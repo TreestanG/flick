@@ -1168,20 +1168,26 @@ function newCommand(gesture = null) {
         els.count.textContent = `Step ${data.step} · 0:00`;
       }
     },
-    onPrompt({ phase, count, index, asked, budget, ready = 0, back = false }) {
+    onPrompt({ phase, count, index, asked, budget, ready = 0, back = false, sample: redo = null, of = null, which = null }) {
       if (!training) return;
       // Back from the review or from the agent's work, to record: with the camera.
       if (view !== "record" || !els.camera) showTraining("", "", true);
       setPhase(phase);
-      // One timeline entry for each batch of recording.
+      // One timeline entry for each batch of recording. Samples being redone
+      // are named by their number, counted from the first one recorded.
       const kind = `record:${phase}`;
       let item = last();
-      if (!item || item.kind !== kind || item.ended) item = entry(kind, RECORDING[phase] || "Record samples");
+      const title = which && which.length
+        ? `Redo sample${which.length > 1 ? "s" : ""} ${which.join(", ")}`
+        : RECORDING[phase] || "Record samples";
+      if (!item || item.kind !== kind || item.ended) item = entry(kind, title);
       item.detail.textContent = `${Math.min(index, count)} of ${count} recorded`;
       // "negatives": the user performs motions that are NOT the gesture.
       const negative = phase === "negatives";
       const sample = phase === "redoing"
-        ? `Redo ${Math.min(index + 1, count)} of ${count}: an earlier sample was not the gesture`
+        ? (redo
+          ? `Redo your sample ${redo}${of ? ` of ${of}` : ""} (${Math.min(index + 1, count)} of ${count} to redo): it was not the gesture`
+          : `Redo ${Math.min(index + 1, count)} of ${count}: an earlier sample was not the gesture`)
         : negative ? `Not the gesture: ${Math.min(index + 1, count)} of ${count}`
           : `Sample ${Math.min(index + 1, count)} of ${count}`;
       if (ready) {                        // the countdown: 1, 2, then go

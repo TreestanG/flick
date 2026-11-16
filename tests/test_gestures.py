@@ -338,8 +338,10 @@ class User:
     def __init__(self, sizes=(0.3,)):
         self.sizes, self.asked, self.count = sizes, [], 0
 
-    def collect(self, count, phase, asked, budget):
+    def collect(self, count, phase, asked, budget, which=None, of=None):
         self.asked.append((count, phase))
+        if which:
+            self.redo = (which, of)
         made = []
         for _ in range(count):
             dx = self.sizes[min(self.count // 3, len(self.sizes) - 1)]
@@ -526,6 +528,13 @@ def test_first_ten_are_collected_before_the_model_is_asked():
     assert len(client.calls) == 3               # no call spent on asking for the first batch
     assert "collects the first 10 itself" in client.calls[0][0]["content"]
     assert "Collected 10 new positives" in client.calls[0][-1]["content"]
+
+
+def test_redo_tells_the_user_which_samples_to_perform_again():
+    client = Scripted("REQUEST 4", "REDO P2 P4", block(swipe_code()), "TEST 5", "CONFIDENT")
+    run, user = make(client)
+    assert run.run().passed
+    assert user.redo == ([2, 4], 4) and (2, "redoing") in user.asked
 
 
 def test_gives_up_after_too_many_replies_in_a_round():

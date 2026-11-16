@@ -163,7 +163,8 @@ class Training:
             except queue.Empty:
                 continue
 
-    def collect(self, count: int, phase: str, asked: int, budget: int) -> list[Segment]:
+    def collect(self, count: int, phase: str, asked: int, budget: int,
+                which: list | None = None, of: int | None = None) -> list[Segment]:
         got: list[Segment | None] = [None] * count
         # Negatives (motions that are not the gesture) are for this run only:
         # none are kept as the gesture's own samples, and they do not use up
@@ -176,8 +177,12 @@ class Training:
             return asked + (first if negative else count)
 
         def prompt(index: int, ready: int, back: bool = False) -> None:
+            # When samples are being redone: which of the user's samples this
+            # one replaces (`sample`, of `of`), and all that are being replaced.
+            redo = which[index] if which and index < len(which) else None
             self.bus.emit("training_prompt", phase=phase, count=count, index=index,
-                          asked=total(), budget=budget, ready=ready, back=back)
+                          asked=total(), budget=budget, ready=ready, back=back,
+                          **({"sample": redo, "of": of, "which": list(which)} if which else {}))
 
         def record(index: int, back: bool = False) -> int:
             """Take sample `index` and return which one comes next. The user may
