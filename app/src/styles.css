@@ -509,7 +509,7 @@ select.field { padding-right: 6px; }
    whole run on the right */
 .dialog.session {
   width: min(960px, calc(100vw - 48px));
-  height: min(640px, calc(100vh - 48px));
+  height: min(700px, calc(100vh - 48px));
   display: flex; flex-direction: column;
   overflow: hidden;
 }
@@ -610,3 +610,37 @@ select.field { padding-right: 6px; }
   .overlay { animation: none; }
   .scroll { scroll-behavior: auto; }
 }
+
+/* the recording view of a training run: the camera, with what is tracked drawn
+   on it, framed by the dialog itself; the prompt and the countdown lie over
+   the picture and the progress of this batch is the bar under it */
+.session .stage.record { overflow: hidden; }
+.shot {
+  position: relative;
+  flex: 1; min-height: 0;
+  display: grid; place-items: center;
+  border-radius: 20px;
+  overflow: hidden;
+  background: #000;
+}
+.shot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.shot img.mirror { transform: scaleX(-1); }
+.shot-empty { font-size: var(--text-small); color: rgba(255, 255, 255, 0.6); }
+.shot .phase {
+  position: absolute; top: 14px; left: 14px;
+  margin: 0; padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #FFFFFF;
+}
+.shot-text {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 56px 20px 18px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.78));
+  color: #FFFFFF;
+}
+.shot-text .prompt { margin: 0; color: #FFFFFF; }
+.shot-text .prompt.wait { color: rgba(255, 255, 255, 0.78); }
+.shot-text .count { margin: 4px 0 0; color: rgba(255, 255, 255, 0.82); }
+.session .stage.record > .bar { flex: none; height: 6px; margin-top: 14px; border-radius: 3px; }
+.session .stage.record .buttons { margin-top: 0; }

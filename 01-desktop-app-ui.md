@@ -277,7 +277,7 @@ Same names and contents as before.
 | `settings_changed` | settings (only the changed keys) |
 | `record_idle` | on |
 | `delete_idle_video` | clip id |
-| `set_preview` (new) | on |
+| `set_preview` (new) | on, points (draw the tracked parts whatever the setting; the training view sends it) |
 | `set_api_key`, `remove_api_key` (new) | key (only for set) |
 | `quit` (new) | Stops the engine. Sent by Quit in the window's app menu |
 

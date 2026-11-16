@@ -364,12 +364,26 @@ function clearPreview(text) {
   ui.previewText.textContent = text;
 }
 
-/** Ask for preview frames only while the camera card can be seen. */
+/** Ask for preview frames only while a camera picture can be seen: the camera
+ *  card, or the recording view of a training run. That one always has the
+ *  tracked parts drawn on it, whatever the setting says. */
 function updatePreview() {
-  const wanted = engine.connected && state.page === "main" && document.visibilityState === "visible";
-  if (wanted === state.previewOn) return;
+  const recording = !!(dialog && dialog.camera());
+  const wanted = engine.connected && (state.page === "main" || recording) && document.visibilityState === "visible";
+  const points = wanted && recording;
+  if (wanted === state.previewOn && points === state.previewPoints) return;
   state.previewOn = wanted;
-  if (engine.connected) engine.send("set_preview", { on: wanted }).catch(() => {});
+  state.previewPoints = points;
+  if (engine.connected) engine.send("set_preview", { on: wanted, points }).catch(() => {});
+}
+
+/** Put one preview frame in an image, and let go of the one before it. */
+function showFrame(image, blob) {
+  const old = image.dataset.url;
+  image.dataset.url = URL.createObjectURL(blob);
+  image.src = image.dataset.url;
+  image.hidden = false;
+  if (old) URL.revokeObjectURL(old);
 }
 
 function setFilter(text) {
@@ -934,8 +948,15 @@ function newCommand(gesture = null) {
       if (training) engine.send("cancel_training").catch(() => {});   // nothing is saved on cancel
       training = false;
       dialog = null;
+      dropCamera();
+      updatePreview();
     },
   });
+  /** Let go of the camera picture of the recording view. */
+  function dropCamera() {
+    if (els.camera && els.camera.dataset.url) URL.revokeObjectURL(els.camera.dataset.url);
+    els.camera = null;
+  }
   /** Switch what the dialog shows. The form is a small dialog; everything
    *  after it is the large one, with the timeline on its right. */
   function swap(name, title, ...children) {
@@ -944,8 +965,9 @@ function newCommand(gesture = null) {
     d.title.textContent = title;
     const session = name !== "form";
     d.box.classList.toggle("session", session);
-    if (session) d.body.replaceChildren(h("div", { class: "session" }, h("div", { class: "stage" }, children), side));
+    if (session) d.body.replaceChildren(h("div", { class: "session" }, h("div", { class: `stage ${name}` }, children), side));
     else d.body.replaceChildren(...children.filter(Boolean));
+    updatePreview();            // the camera is asked for only while the recording view shows it
   }
   const buttons = (...items) => h("div", { class: "buttons" }, items);
   /** Cancel asks first once a run is under way: one click must not throw
@@ -998,9 +1020,13 @@ function newCommand(gesture = null) {
 
   const phaseText = () => `${phase.slice(0, 1).toUpperCase() + phase.slice(1)}  ·  round ${round}`;
 
-  /** The recording view: the prompt, the countdown and the progress bar. */
+  /** The recording view: the camera with what is tracked drawn on it, the
+   *  prompt and the countdown over it, and the progress bar of this batch
+   *  under it. */
   function showTraining(prompt = "Starting…", count = "Loading your recorded motions. Don't move yet: a countdown comes first.") {
+    dropCamera();
     els = {
+      camera: h("img", { alt: "Camera", hidden: true, class: state.settings.mirror ? "mirror" : "" }),
       phase: h("div", { class: "phase", text: phaseText() }),
       prompt: h("div", { class: "prompt", text: prompt }),
       count: h("div", { class: "count", text: count }),
@@ -1009,7 +1035,12 @@ function newCommand(gesture = null) {
       restart: button("Restart", () => engine.send("restart_sample").catch(() => {})),
     };
     els.restart.hidden = true;
-    swap("record", heading, els.phase, els.prompt, els.count, h("div", { class: "bar" }, els.fill),
+    swap("record", heading,
+      h("div", { class: "shot" },
+        h("span", { class: "shot-empty", text: state.cameraOk ? "Starting the camera…" : "Camera error" }),
+        els.camera, els.phase,
+        h("div", { class: "shot-text" }, els.prompt, els.count)),
+      h("div", { class: "bar" }, els.fill),
       buttons(button("Cancel", cancel), els.restart));
   }
 
@@ -1086,6 +1117,8 @@ function newCommand(gesture = null) {
 
   dialog = {
     close: () => d.close(),
+    /** The image the camera goes to, while the recording view is showing. */
+    camera: () => (view === "record" && els.camera) || null,
     /** The engine went away: its training is gone with it. */
     drop() { training = false; d.close(); },
     onSample({ index, fps, frames }) {
@@ -1469,7 +1502,7 @@ engine.on("snapshot", (snapshot) => {
   state.idle = snapshot.idle_videos || [];
   state.cameras = snapshot.cameras || [];
   state.apiKey = snapshot.api_key || state.apiKey;
-  state.previewOn = false;            // a new connection starts with the preview off
+  state.previewOn = state.previewPoints = false;   // a new connection starts with the preview off
   state.testing = false;              // and with test mode off
   setGestures(snapshot.gestures || []);
   renderTesting();
@@ -1484,7 +1517,7 @@ engine.on("snapshot", (snapshot) => {
 });
 
 engine.on("down", () => {
-  state.previewOn = false;
+  state.previewOn = state.previewPoints = false;
   state.testing = false;
   renderTesting();
   state.gotStatus = false;
@@ -1500,14 +1533,15 @@ engine.on("down", () => {
 });
 
 engine.on("frame", (blob) => {
-  if (!state.cameraOk || state.page !== "main") return;
-  const image = ui.previewImage;
-  const old = image.dataset.url;
-  image.dataset.url = URL.createObjectURL(blob);
-  image.src = image.dataset.url;
-  image.hidden = false;
+  if (!state.cameraOk) return;
+  const recording = dialog && dialog.camera();
+  if (recording) {                    // the training view is in front of the camera card
+    showFrame(recording, blob);
+    return;
+  }
+  if (state.page !== "main") return;
+  showFrame(ui.previewImage, blob);
   ui.previewText.textContent = "";
-  if (old) URL.revokeObjectURL(old);
 });
 
 engine.on("tracker_status", ({ fps = 0, visible = [], speed = 0, camera_ok = true, moving, segment, loading = false, live = null }) => {

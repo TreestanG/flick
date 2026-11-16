@@ -75,6 +75,7 @@ class _Client:
     def __init__(self, ws):
         self.ws = ws
         self.preview = False
+        self.points = False                 # it wants the tracked parts drawn, whatever the setting
         self.texts: collections.deque = collections.deque()
         self.frame: bytes | None = None     # only the newest preview frame waits
         self.wake = asyncio.Event()
@@ -117,6 +118,7 @@ class Server:
                        "idle_videos": [], "cameras": []}
         self._seen_window = False
         self._want_preview = False
+        self._want_points = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopping: asyncio.Event | None = None
         self._stop = threading.Event()
@@ -206,7 +208,7 @@ class Server:
             if frame is None:
                 continue
             try:
-                data = preview.encode(frame, self.settings.show_points)
+                data = preview.encode(frame, self.settings.show_points or self._want_points)
             except Exception:
                 traceback.print_exc()
                 continue
@@ -308,6 +310,7 @@ class Server:
 
     def _update_preview(self) -> None:
         self._want_preview = any(c.preview for c in self._clients)
+        self._want_points = any(c.preview and c.points for c in self._clients)
         if self.backend is not None:
             self.backend.preview = self._want_preview
 
@@ -374,6 +377,9 @@ class Server:
 
     def _cmd_set_preview(self, client: _Client, data) -> None:
         client.preview = bool(data.get("on"))
+        # The training view always shows what is tracked: the user has to see
+        # that the hand is found before a sample is taken.
+        client.points = bool(data.get("points"))
         if not client.preview:
             client.frame = None
         self._update_preview()
