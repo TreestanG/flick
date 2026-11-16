@@ -1020,13 +1020,16 @@ function newCommand(gesture = null) {
 
   const phaseText = () => `${phase.slice(0, 1).toUpperCase() + phase.slice(1)}  ·  round ${round}`;
 
-  /** The recording view: the camera with what is tracked drawn on it, the
-   *  prompt and the countdown over it, and the progress bar of this batch
-   *  under it. */
-  function showTraining(prompt = "Starting…", count = "Loading your recorded motions. Don't move yet: a countdown comes first.") {
+  /** The recording view. While samples are taken (`camera`) it is the camera
+   *  with what is tracked drawn on it, the prompt and the countdown over it
+   *  and the progress bar of this batch under it. While the app or the agent
+   *  works (starting, sending, writing the function) there is nothing to
+   *  watch, so it is only the text and the bar. */
+  function showTraining(prompt = "Starting…", count = "Loading your recorded motions. Don't move yet: a countdown comes first.", camera = false) {
     dropCamera();
     els = {
-      camera: h("img", { alt: "Camera", hidden: true, class: state.settings.mirror ? "mirror" : "" }),
+      camera: camera ? h("img", { alt: "Camera", hidden: true, class: state.settings.mirror ? "mirror" : "" }) : null,
+      glow: h("div", { class: "shot-glow" }),
       phase: h("div", { class: "phase", text: phaseText() }),
       prompt: h("div", { class: "prompt", text: prompt }),
       count: h("div", { class: "count", text: count }),
@@ -1035,13 +1038,19 @@ function newCommand(gesture = null) {
       restart: button("Restart", () => engine.send("restart_sample").catch(() => {})),
     };
     els.restart.hidden = true;
+    if (!camera) {
+      swap("record", heading, els.phase, els.prompt, els.count, h("div", { class: "bar" }, els.fill),
+        buttons(button("Cancel", cancel), els.restart));
+      return;
+    }
     swap("record", heading,
       h("div", { class: "shot" },
         h("span", { class: "shot-empty", text: state.cameraOk ? "Starting the camera…" : "Camera error" }),
-        els.camera, els.phase,
+        els.camera, els.glow, els.phase,
         h("div", { class: "shot-text" }, els.prompt, els.count)),
       h("div", { class: "bar" }, els.fill),
       buttons(button("Cancel", cancel), els.restart));
+    d.body.querySelector(".stage").classList.add("camera");
   }
 
   const setPhase = (name) => {
@@ -1138,7 +1147,8 @@ function newCommand(gesture = null) {
     onProgress(data) {
       if (!training) return;
       round = data.round;
-      if (view !== "record") showTraining();
+      // Nothing is recorded while the function is written: no camera then.
+      if (view !== "record" || (data.phase === "revising" && els.camera)) showTraining();
       setPhase(data.phase);
       if (data.phase === "revising") {
         els.prompt.textContent = "Writing the gesture function";
@@ -1160,7 +1170,8 @@ function newCommand(gesture = null) {
     },
     onPrompt({ phase, count, index, asked, budget, ready = 0, back = false }) {
       if (!training) return;
-      if (view !== "record") showTraining();      // back from the review, to record again
+      // Back from the review or from the agent's work, to record: with the camera.
+      if (view !== "record" || !els.camera) showTraining("", "", true);
       setPhase(phase);
       // One timeline entry for each batch of recording.
       const kind = `record:${phase}`;
@@ -1184,6 +1195,9 @@ function newCommand(gesture = null) {
         els.count.textContent = sample;
       }
       els.prompt.classList.toggle("wait", !!ready);
+      // The countdown closes in: a green edge that grows with each number and
+      // is a firm ring on go. After the last sample of a batch there is none.
+      els.glow.dataset.step = index >= count ? "" : ready ? String(ready) : "go";
       // During the countdown it redoes the sample just recorded, if there is
       // one in this batch; once recording has begun it takes this one again.
       els.restart.hidden = index >= count;
