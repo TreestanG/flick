@@ -30,7 +30,7 @@ const DETECTION_DEFAULTS = {
 const CHECKLIST = [   // key, text, settings section, optional
   ["camera", "Allow camera access", "camera", false],
   ["idle", "Record an idle video (needed for training)", "idle", false],
-  ["key", "Add a Fireworks API key", "model", false],
+  ["key", "Add a Claude Code token", "model", false],
   ["chrome", "Connect Chrome", "chrome", true],
 ];
 const FAILED_TEXT = "Couldn't tell this gesture apart from your other movements. " +
@@ -47,7 +47,7 @@ const state = {
   chrome: { connected: false, message: "" },
   idle: [],
   cameras: [],
-  apiKey: { present: false, masked: "", from_env: false, env_var: "FIREWORKS_API_KEY" },
+  apiKey: { present: false, masked: "", from_env: false, env_var: "CLAUDE_CODE_OAUTH_TOKEN" },
   cameraOk: true,
   gotStatus: false,
   page: "",
@@ -203,12 +203,12 @@ function openDialog(title, { wide = false, onClose = null, locked = null } = {})
   return entry;
 }
 
-function confirmDialog(title, message, confirmText, onConfirm) {
+function confirmDialog(title, message, confirmText, onConfirm, keepText = "Cancel") {
   const d = openDialog(title);
   d.body.append(
     h("p", { text: message }),
     h("div", { class: "buttons" },
-      button("Cancel", () => d.close()),
+      button(keepText, () => d.close()),
       button(confirmText, () => { d.close(); onConfirm(); }, "danger")));
 }
 
@@ -815,18 +815,22 @@ async function dataDashboard(gesture) {
     d.close();
     after();
   };
+  // A wide dialog: what the gesture is on the left, its saved samples on the right.
   d.body.append(
-    h("label", { for: "data-motion", text: "Motion description" }), motion,
-    h("label", { for: "data-notes", text: "How it should work (extra notes for the function writer)" }), notes,
-    h("label", { text: "Complementary gestures" }),
-    h("p", { class: "small", text: others.length
-      ? "When this gesture triggers, the ones ticked here cannot trigger for the next " +
-        "5 seconds, and the other way round. Use it for pairs where the hand coming back " +
-        "from one looks like the other, such as swipe left and swipe right."
-      : "There are no other gestures yet to pair this one with." }),
-    others.length ? pairs : null,
-    h("label", { text: "Saved samples" }), summary,
-    count ? h("div", { class: "clips-grid data-grid" }, cards) : null,
+    h("div", { class: "review-cols" },
+      h("div", {},
+        h("label", { for: "data-motion", text: "Motion description" }), motion,
+        h("label", { for: "data-notes", text: "How it should work (extra notes for the function writer)" }), notes,
+        h("label", { text: "Complementary gestures" }),
+        h("p", { class: "small", text: others.length
+          ? "When this gesture triggers, the ones ticked here cannot trigger for the next " +
+            "5 seconds, and the other way round. Use it for pairs where the hand coming back " +
+            "from one looks like the other, such as swipe left and swipe right."
+          : "There are no other gestures yet to pair this one with." }),
+        others.length ? pairs : null),
+      h("div", {},
+        h("label", { text: "Saved samples" }), summary,
+        count ? h("div", { class: "clips-grid data-grid" }, cards) : null)),
     h("p", { class: "small", text: "Saving keeps the function the gesture uses now. The description, " +
       "notes and samples above are what the next training starts from; Add data and re-train " +
       "saves them and starts it." }),
@@ -842,6 +846,13 @@ async function dataDashboard(gesture) {
 
 // new command dialog: a short form that becomes the training view -------------
 
+const RECORDING = {
+  collecting: "Record samples",
+  negatives: "Record motions that are not the gesture",
+  redoing: "Redo samples that were not the gesture",
+  testing: "Record test samples",
+};
+
 function newCommand(gesture = null) {
   if (dialog) return;
   setTesting(false);            // training takes every motion
@@ -854,31 +865,99 @@ function newCommand(gesture = null) {
   let players = [];           // the videos now playing on the review page
   let els = {};
   const heading = gesture ? "Re-train" : "New command";
-  let waitTimer = null;       // ticks while the agent works on a step
   const stopPlayers = () => {
     players.forEach((p) => p.stop());
     players = [];
-    clearInterval(waitTimer);
-    waitTimer = null;
   };
+
+  // The timeline beside the training view: everything this run has done, in
+  // order, with the entry now in progress last. It stays while the view on its
+  // left changes between recording, review and result.
+  let log = [];
+  const timeline = h("ol", { class: "timeline" });
+  const askedEl = h("span", { class: "small", text: "" });
+  const side = h("aside", { class: "side" },
+    h("div", { class: "side-head" }, h("span", { text: "Progress" }), askedEl), timeline);
+  const last = () => log[log.length - 1] || null;
+  const waited = (item) => clock(((item.ended || performance.now()) - item.started) / 1000);
+  /** Close the entry in progress: it keeps how long it took. */
+  function finish() {
+    const item = last();
+    if (!item || item.ended) return;
+    item.ended = performance.now();
+    item.el.className = "done";
+    item.time.textContent = waited(item);
+    if (item.detail.textContent === WORKING) item.detail.textContent = "";
+  }
+  /** Add an entry and make it the one in progress. */
+  function entry(kind, title, detail = "") {
+    finish();
+    const item = {
+      kind, started: performance.now(), ended: 0,
+      title: h("span", { class: "t-title", text: title }),
+      time: h("span", { class: "t-time small", text: "0:00" }),
+      detail: h("div", { class: "t-detail small", text: detail }),
+    };
+    item.el = h("li", { class: "active" }, h("span", { class: "t-dot" }),
+      h("div", { class: "t-body" }, h("div", { class: "t-head" }, item.title, item.time), item.detail));
+    timeline.append(item.el);
+    log.push(item);
+    timeline.scrollTop = timeline.scrollHeight;
+    return item;
+  }
+  const WORKING = "Working…";
+  // Once a second: the running entry's clock, and the same wait on the left
+  // while the agent works on a step, so a wait is not blank.
+  const tick = setInterval(() => {
+    const item = last();
+    if (!item || item.ended) return;
+    item.time.textContent = waited(item);
+    if (item.kind === "step" && view === "record" && els.count) {
+      els.count.textContent = `Step ${item.step} · ${waited(item)}`;
+    }
+  }, 1000);
+  /** A run begins: an empty timeline and the recording view. */
+  function begin() {
+    training = true; round = 1; phase = "collecting"; clips = []; els = {};
+    log = [];
+    timeline.replaceChildren();
+    askedEl.textContent = "";
+    entry("setup", "Getting ready");
+    showTraining();
+  }
+
   const d = openDialog(heading, {
     locked: () => training,
     onClose() {
       stopPlayers();
+      clearInterval(tick);
       if (training) engine.send("cancel_training").catch(() => {});   // nothing is saved on cancel
       training = false;
       dialog = null;
     },
   });
-  /** Switch what the dialog shows. Only the review page is wide. */
+  /** Switch what the dialog shows. The form is a small dialog; everything
+   *  after it is the large one, with the timeline on its right. */
   function swap(name, title, ...children) {
     stopPlayers();
     view = name;
     d.title.textContent = title;
-    d.box.classList.toggle("review", name === "review");
-    d.body.replaceChildren(...children);
+    const session = name !== "form";
+    d.box.classList.toggle("session", session);
+    if (session) d.body.replaceChildren(h("div", { class: "session" }, h("div", { class: "stage" }, children), side));
+    else d.body.replaceChildren(...children.filter(Boolean));
   }
   const buttons = (...items) => h("div", { class: "buttons" }, items);
+  /** Cancel asks first once a run is under way: one click must not throw
+   *  away the samples and the agent's work. */
+  function cancel() {
+    if (!training) { d.close(); return; }
+    const ready = view === "result";
+    confirmDialog(ready ? "Discard this gesture?" : "Cancel training?",
+      ready ? "The gesture is ready but not saved. Discarding it throws away the samples and the function written for it."
+        : "Everything in this run is lost: the samples you recorded and the work done on them so far. Nothing is saved.",
+      ready ? "Discard gesture" : "Cancel training", () => d.close(), "Keep going");
+  }
 
   function showForm() {
     const fields = {};
@@ -909,8 +988,7 @@ function newCommand(gesture = null) {
       }
       engine.send("start_training", {
         name: values.name, action_text: values.action, motion_text: values.motion, gesture_id: ownId,
-      }).then(() => { training = true; round = 1; phase = "collecting"; clips = []; els = {}; showTraining(); },
-        (failure) => { error.textContent = failure.message; });
+      }).then(begin, (failure) => { error.textContent = failure.message; });
     }
 
     swap("form", heading, ...rows, error,
@@ -922,19 +1000,17 @@ function newCommand(gesture = null) {
 
   /** The recording view: the prompt, the countdown and the progress bar. */
   function showTraining(prompt = "Starting…", count = "Loading your recorded motions. Don't move yet: a countdown comes first.") {
-    const asked = els.asked ? els.asked.textContent : "Samples asked: 0 of 40";
     els = {
       phase: h("div", { class: "phase", text: phaseText() }),
       prompt: h("div", { class: "prompt", text: prompt }),
       count: h("div", { class: "count", text: count }),
       fill: h("div"),
-      asked: h("div", { class: "small asked", text: asked }),
       // Only while a sample is being taken; onPrompt shows it and names it.
       restart: button("Restart", () => engine.send("restart_sample").catch(() => {})),
     };
     els.restart.hidden = true;
     swap("record", heading, els.phase, els.prompt, els.count, h("div", { class: "bar" }, els.fill),
-      els.asked, buttons(button("Cancel", () => d.close()), els.restart));
+      buttons(button("Cancel", cancel), els.restart));
   }
 
   const setPhase = (name) => {
@@ -993,12 +1069,15 @@ function newCommand(gesture = null) {
         : "Watch each video. It should show the whole motion, from start to finish. " +
           "Re-record any that went wrong, then submit." }),
       h("div", { class: "clips-grid" }, cards), note,
-      buttons(button("Cancel", () => d.close()),
+      buttons(button("Cancel", cancel),
         button("Re-record all", () => send("rerecord_sample", { index: null })),
         // More than was asked for, if the user wants to give the agent more.
         more ? button("Record one more", () => send("add_sample")) : null,
         button(`Submit ${count} samples`, () => {
           send("submit_samples");
+          const item = last();
+          if (item && item.kind === "review") item.detail.textContent = `Submitted ${count} samples`;
+          finish();
           clips = [];
           showTraining("One moment", "Sending your samples…");
         }, "primary")));
@@ -1015,6 +1094,12 @@ function newCommand(gesture = null) {
     onReview(data) {
       if (!training) return;
       setPhase(data.phase);
+      const title = data.phase === "negatives" ? "Check your not-the-gesture motions" : "Check your samples";
+      const item = last();
+      if (item && item.kind.startsWith("record:") && !item.ended) item.detail.textContent = `${data.count} recorded`;
+      const detail = `${data.count} to review`;
+      if (item && item.kind === "review" && !item.ended) item.detail.textContent = detail;
+      else entry("review", title, detail);
       showReview(data);
     },
     onProgress(data) {
@@ -1023,28 +1108,32 @@ function newCommand(gesture = null) {
       if (view !== "record") showTraining();
       setPhase(data.phase);
       if (data.phase === "revising") {
-        // Each step is one question to the model; show which, what the last
-        // one led to, and how long this one has taken, so a wait is not blank.
-        const started = performance.now();
-        const line = () => {
-          const waited = clock((performance.now() - started) / 1000);
-          els.count.textContent = data.step
-            ? [`Step ${data.step}`, waited, data.note].filter(Boolean).join(" · ")
-            : "Writing the gesture function…";
-        };
         els.prompt.textContent = "Writing the gesture function";
         els.prompt.classList.remove("wait");
-        clearInterval(waitTimer);
-        waitTimer = setInterval(line, 1000);
-        line();
+        els.restart.hidden = true;
+        // Each step is one question to the model. Its note says what the step
+        // before it led to, so that goes on the earlier entry.
+        const item = last();
+        if (!data.step) {
+          if (!item || item.kind !== "step" || item.ended) els.count.textContent = "Writing the gesture function…";
+          return;
+        }
+        if (item && item.kind === "step" && item.step === data.step) return;
+        const before = log.findLast((e) => e.kind === "step");
+        if (before && data.note) before.detail.textContent = data.note;
+        entry("step", `Step ${data.step}`, WORKING).step = data.step;
+        els.count.textContent = `Step ${data.step} · 0:00`;
       }
     },
     onPrompt({ phase, count, index, asked, budget, ready = 0, back = false }) {
       if (!training) return;
       if (view !== "record") showTraining();      // back from the review, to record again
-      clearInterval(waitTimer);
-      waitTimer = null;
       setPhase(phase);
+      // One timeline entry for each batch of recording.
+      const kind = `record:${phase}`;
+      let item = last();
+      if (!item || item.kind !== kind || item.ended) item = entry(kind, RECORDING[phase] || "Record samples");
+      item.detail.textContent = `${Math.min(index, count)} of ${count} recorded`;
       // "negatives": the user performs motions that are NOT the gesture.
       const negative = phase === "negatives";
       const sample = phase === "redoing"
@@ -1067,11 +1156,13 @@ function newCommand(gesture = null) {
       els.restart.hidden = index >= count;
       els.restart.textContent = ready && back ? "Redo last sample" : "Restart";
       els.fill.style.width = `${count ? (index / count) * 100 : 0}%`;
-      els.asked.textContent = `Samples asked: ${asked} of ${budget}`;
+      askedEl.textContent = `${asked} of ${budget} samples asked`;
     },
     onResult({ passed, summary = "", message = "", parts = [], code = "", action = null, retry = true }) {
       if (!training) return;
+      entry("result", passed ? "Gesture ready" : "Not passed", passed ? "Waiting for you to save it" : "");
       if (!passed) {
+        finish();
         training = false;               // nothing is waiting in the engine
         swap("result", "Not passed", h("p", { text: message || FAILED_TEXT }),
           buttons(button("Close", () => d.close()),
@@ -1098,7 +1189,7 @@ function newCommand(gesture = null) {
           ? button("View the action's script", () => codeDialog(`${values.name}: action script`,
             (chosen && chosen.code) || action.code), "link") : null,
         button("View code", () => codeDialog(`${values.name}: detect`, code), "link"),
-        buttons(button("Cancel", () => d.close()),
+        buttons(button("Cancel", cancel),
           button("Save", () => {
             training = false;
             command("save_gesture", chosen ? { action: chosen } : {});
@@ -1110,7 +1201,7 @@ function newCommand(gesture = null) {
     // Re-train only adds samples: same name, action and description, no form.
     engine.send("start_training", {
       name: gesture.name, action_text: "", motion_text: gesture.motion || "", gesture_id: gesture.id,
-    }).then(() => { training = true; round = 1; phase = "collecting"; clips = []; els = {}; showTraining(); },
+    }).then(begin,
       (failure) => swap("result", heading, h("p", { class: "error", text: failure.message }),
         buttons(button("Close", () => d.close()))));
     showTraining("One moment", "Starting from the samples this gesture already has…");
@@ -1204,17 +1295,10 @@ function buildSettings() {
   s.keyControls = h("div", { class: "row" });
   s.keyError = h("div", { class: "note" });
   s.model = h("input", {
-    class: "field", placeholder: "accounts/fireworks/models/…", style: "width:260px",
+    class: "field", placeholder: "claude-opus-5-5", style: "width:260px",
     autocomplete: "off", spellcheck: false,
     onchange: () => saveSettings({ model_name: s.model.value.trim() }),
   });
-
-  s.writers = {};
-  s.writer = h("div", { class: "segmented" }, [["claude", "Claude API"], ["fireworks", "Fireworks model"]]
-    .map(([key, text]) => {
-      s.writers[key] = h("button", { type: "button", text, onclick: () => saveSettings({ writer: key }) });
-      return s.writers[key];
-    }));
 
   // chrome
   s.chromeStatus = h("span", { class: "muted", text: "Connecting…" });
@@ -1253,10 +1337,8 @@ function buildSettings() {
       section("appearance", "Appearance", "monitor",
         setting("Theme", "System follows your computer's setting.", themes)),
       section("model", "Model", "code",
-        setting("Who writes gesture functions",
-          "Claude API and Fireworks model need their own API key below.", s.writer),
         h("div", { class: "setting" },
-          h("div", { class: "text" }, (s.keyLabel = h("span", { text: "API key" })), s.keyHint), s.keyControls),
+          h("div", { class: "text" }, h("span", { text: "Claude Code token" }), s.keyHint), s.keyControls),
         setting("Model name", "", s.model), s.keyError),
       section("chrome", "Chrome", "globe",
         setting("Connection", "Connects by itself when the engine starts.", s.chromeStatus, s.chromeRetry)),
@@ -1278,7 +1360,6 @@ function syncSettings() {
   const s = ui.settings;
   const values = state.settings;
   s.mirror.input.checked = !!values.mirror;
-  for (const [key, el] of Object.entries(s.writers)) el.classList.toggle("on", key === (values.writer === "claude" ? "claude" : "fireworks"));
   s.points.input.checked = !!values.show_points;
   s.login.input.checked = !!values.start_on_login;
   s.background.input.checked = !!values.run_in_background;
@@ -1310,8 +1391,9 @@ function setDetection(key) {
 function renderKey() {
   const s = ui.settings;
   const key = state.apiKey;
-  s.keyLabel.textContent = `${key.name || "Fireworks"} API key`;
-  s.keyHint.textContent = `Read from ${key.env_var} if set, otherwise stored in the OS keychain.`;
+  s.keyHint.textContent = "Claude Code writes gesture functions in a Docker container the engine starts. "
+    + "Run claude setup-token in a terminal and paste the token it prints. "
+    + `Read from ${key.env_var} if set, otherwise stored in the OS keychain.`;
   const fail = (error) => { s.keyError.textContent = error.message; };
   if (key.present && key.from_env) {
     s.keyControls.replaceChildren(h("span", { class: "muted", text: `${key.masked}  from ${key.env_var}` }));
@@ -1320,7 +1402,7 @@ function renderKey() {
       button("Remove", () => { s.keyError.textContent = ""; engine.send("remove_api_key").catch(fail); }));
   } else {
     // The key goes to the engine once and is not kept here.
-    const input = h("input", { class: "field", type: "password", placeholder: "Paste key", style: "width:180px", autocomplete: "off" });
+    const input = h("input", { class: "field", type: "password", placeholder: "Paste token", style: "width:180px", autocomplete: "off" });
     const save = () => {
       if (!input.value.trim()) return;
       s.keyError.textContent = "";

@@ -18,7 +18,7 @@ Everything in this file runs in the engine: a headless Python process that keeps
 ```
 dataset.py       # store positives and negatives, idle videos, fresh-sample requests
 trainer.py       # agent loop: request samples, write function, test, decide
-model_client.py  # ModelClient interface + Fireworks backend, key from the OS keychain
+model_client.py  # ModelClient interface; claude_code.py is the backend, token from the OS keychain
 sandbox.py       # AST allowlist check + subprocess runner with timeout
 detector.py      # runtime: load saved functions, run each on every Segment
 store.py         # gestures and settings on disk
@@ -59,6 +59,7 @@ The agent chooses how many samples to ask for. Each request is "k positives plus
 2. **First batch:** the agent picks k and requests k positive samples. The user performs the motion that many times.
 3. **Negatives for that batch (3k):** drawn from two sources: the user's other saved gestures, and videos of the user doing nothing (recorded once during setup and run through the same tracker and segmenter). If the pool is too small, the app asks the user to record more idle video. Fresh test negatives come from the same two sources and are held back from training.
 4. **Write:** the agent writes `detect` from everything collected so far and the app runs it in the sandbox. Failures on training data are fed back until it passes.
+   - Each negative is also run in pieces: the stretches the live loop would have checked while that motion was happening (`segmenter.cuts`: about every 0.1 s, from where the motion began and 0.4 to 3 s back). A `True` on any of them is a mistake, in training and in the fresh tests. This needs no extra samples.
 5. **Test:** the agent chooses a new k and calls test. The app collects k fresh positives and 3k fresh negatives the agent has never seen, and runs the function on them.
 6. **Decide:**
    - If everything is correct, the agent may declare it is confident.
@@ -94,18 +95,17 @@ The agent chooses how many samples to ask for. Each request is "k positives plus
 - If that window closes or its connection drops during training, the engine treats it as Cancel. Nothing is saved.
 - Recognition is paused while training, as the user's motions are samples, not commands.
 
-## Model access (Fireworks)
+## Model access (Claude Code in a container)
 
-The agent uses open models hosted on Fireworks, through its OpenAI-compatible API.
+The agent is Claude Code, running in a Docker container that the engine starts when it starts and removes when it quits.
 
-- **Key:** the user pastes their own Fireworks API key in settings. The UI sends it to the engine once over the local socket and does not keep it. The engine stores it in the OS keychain (`keyring`), never in config files, and only ever sends back a masked form.
-- **Claude through the Anthropic API:** a setting, with the user's own Anthropic API key (not a Claude.ai plan), stored the same way as the Fireworks key. The same text goes out: the user's sentences and statistics about body-part numbers.
-- **Client:** one `ModelClient` interface with a single `complete(messages) -> text` method. Fireworks is the only backend for now. A small interface means another provider can be added later without touching the trainer.
-- **Why not sign in with a Claude plan:** Anthropic's terms do not allow third-party apps to sign users in with Claude.ai plans or route requests through plan credentials, so it is not part of this design.
+- **Token:** the user runs `claude setup-token` and pastes the token it prints in settings. The UI sends it to the engine once over the local socket and does not keep it. The engine stores it in the OS keychain, or reads `CLAUDE_CODE_OAUTH_TOKEN`, and hands it to each call in the container through the environment.
+- **Data:** before each turn the training samples are copied into the container. Claude Code reads them, writes `detect.py` there and checks it with the app's own sandbox; the app pulls the file out and tests it itself. Samples of a fresh test are copied in only after the test.
+- **Client:** one `ModelClient` interface with a single `complete(messages) -> text` method, so the trainer's loop does not know who answers.
+- **Terms:** this is the user's own Claude Code, signed in by the user, on the user's machine. Check Anthropic's terms again before shipping this to other people.
 - **Function writing:** ask for plain text with one Python code block and extract it. This works on any model and does not depend on native tool calling.
 - **Model choice:** a setting. Before settling on a default, run a few models on the same gestures and keep the one that passes the most.
-- **Privacy:** only the body-part numbers and the user's sentences are sent. No video or images leave the machine. The user's Fireworks account terms apply to that data.
-- **Check when building:** the base URL (OpenAI-compatible, `https://api.fireworks.ai/inference/v1` at the time of writing) and the current model names.
+- **Privacy:** the body-part numbers and the user's sentences go to Claude Code. No video or images leave the machine. The user's Anthropic account terms apply to that data.
 
 ## Safety for generated functions
 
@@ -156,7 +156,6 @@ Only the engine reads and writes these. The UI gets what it needs over the socke
 
 ## Open questions
 
-- Which Fireworks model to use as the default.
 - How much idle video is enough. Start with about 5 minutes of everyday use.
 - Whether to add an arming pose (for example, hold an open palm) to prevent accidental triggers.
 - Whether a dropped connection during training should cancel at once, or wait a few seconds for the window to reconnect.
