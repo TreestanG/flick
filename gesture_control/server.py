@@ -62,14 +62,11 @@ class CommandError(Exception):
     """A command that cannot be done; the text goes back to the window."""
 
 
-def api_key_info(writer: str = "fireworks") -> dict:
-    """What a window may know about the key that the chosen writer needs:
-    never the key itself."""
-    provider = keychain.provider_for(writer)
-    value = keychain.get_key(provider)
+def api_key_info() -> dict:
+    """What a window may know about the Claude Code token: never the token itself."""
+    value = keychain.get_key()
     return {"present": bool(value), "masked": keychain.masked(value),
-            "from_env": keychain.from_env(provider), "env_var": keychain.env_var(provider),
-            "provider": provider, "name": keychain.PROVIDERS[provider][2]}
+            "from_env": keychain.from_env(), "env_var": keychain.ENV_VAR}
 
 
 class _Client:
@@ -245,7 +242,7 @@ class Server:
 
     def _snapshot(self) -> dict:
         return {"version": VERSION, "armed": self.armed, "settings": self.settings.to_dict(),
-                "api_key": api_key_info(self.settings.writer),
+                "api_key": api_key_info(),
                 "training": {"active": True} if self._owner else None, **self._cache}
 
     # one window ----------------------------------------------------------
@@ -395,8 +392,6 @@ class Server:
         settings = self.settings.to_dict()
         self.bus.send("settings_changed", settings=settings)
         self._broadcast("settings_changed", {"settings": settings})
-        if "writer" in changes:                 # another writer needs another key
-            self._broadcast("api_key", api_key_info(self.settings.writer))
         return {"settings": settings}
 
     # the action screens (file 04): answered here, they only read ---------------
@@ -441,17 +436,15 @@ class Server:
         key = data.get("key")
         if not isinstance(key, str) or not key.strip():
             raise CommandError("Paste a key first.")
-        provider = keychain.provider_for(self.settings.writer)
-        return self._key_changed(keychain.set_key(key.strip(), provider))
+        return self._key_changed(keychain.set_key(key.strip()))
 
     def _cmd_remove_api_key(self, client, data) -> dict:
-        provider = keychain.provider_for(self.settings.writer)
-        return self._key_changed(keychain.delete_key(provider))
+        return self._key_changed(keychain.delete_key())
 
     def _key_changed(self, error: str | None) -> dict:
         if error:
             raise CommandError(error)
-        info = api_key_info(self.settings.writer)
+        info = api_key_info()
         self._broadcast("api_key", info)
         return info
 

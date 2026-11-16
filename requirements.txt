@@ -4,7 +4,6 @@ keyring>=24
 mediapipe>=0.10.32
 opencv-python>=4.9
 websockets>=13
-anthropic>=1.0
 pyautogui>=0.9.54
 # Only for the old tkinter window in gesture_control/ui, which the engine no longer uses:
 customtkinter>=5.2

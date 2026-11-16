@@ -17,10 +17,10 @@ last motion's length and outcome, for tuning the detection settings.
 
 File 03 lives in `sandbox.py`, `dataset.py`, `detector.py`, `model_client.py`,
 `trainer.py` and the `Training` class in `backend.py`. To train a gesture you
-need a Fireworks API key and an idle video with at least 45 motions in it
+need Docker, a Claude Code token (`claude setup-token`, pasted in settings)
+and an idle video with at least 45 motions in it
 (settings, Idle videos: record yourself working normally for a few minutes).
-The model name in settings may be empty; the default is
-`accounts/fireworks/models/deepseek-v4p1-flash-1017`.
+The model name in settings may be empty; the default is `claude-opus-5-5`.
 
 Choices made where file 02 left them open: speed is the fastest group (each
 hand, head) rather than the mean of all parts, so training and runtime split
@@ -91,10 +91,11 @@ gesture_control/    the engine
   sandbox.py        AST allowlist, FrameView (NEEDS), helpers, subprocess runner
   dataset.py        positives per gesture, idle clips, the pool of negatives
   detector.py       runs every saved function on a motion; fires on exactly one
-  model_client.py   ModelClient interface + Fireworks
+  model_client.py   ModelClient interface
+  claude_code.py    Claude Code in a Docker container, as a ModelClient
   trainer.py        the agent loop: REQUEST, code, TEST, CONFIDENT
   store.py          settings.json, gestures.json, gestures/<id>.py
-  keychain.py       Fireworks API key in the OS keychain
+  keychain.py       Claude Code token in the OS keychain
   autostart.py      start on login (starts the engine)
   ui/               the old tkinter window; no longer used, see below
 chrome_extension/   the Chrome extension: manifest.json, background.js
@@ -171,12 +172,19 @@ checked in a browser, where the button is hidden).
 
 ## Choices made where file 03 left them open
 
-- **Who writes the function:** a setting. "Claude API" calls Claude through
-  the Anthropic API with the official SDK (`claude-opus-5-5` unless the model
-  name in settings starts with `claude-`), using an Anthropic API key kept in
-  the keychain or read from `ANTHROPIC_API_KEY`. "Fireworks model" calls the
-  hosted model. The loop, the tests and the budget are the same
-  either way; only who answers differs.
+- **Who writes the function:** Claude Code, in a
+  Docker container (`claude_code.py`, `container/Dockerfile`). The engine
+  starts the container when it starts and removes it when it quits; the image
+  is built on the first start. It signs in with the token that
+  `claude setup-token` prints, pasted in settings and kept in the keychain (or
+  read from `CLAUDE_CODE_OAUTH_TOKEN`), and handed to each `docker exec`
+  through the environment, never written into the image. Before each turn the
+  trainer copies the training samples into `/work/samples`; Claude Code reads
+  them, writes `/work/detect.py`, checks it there with the app's own sandbox
+  (`/work/tools/check.py`), and the app pulls the file out and tests it
+  itself. Samples of a fresh test are copied in only after the test.
+  `claude-opus-5-5` unless the model name in settings starts with `claude-`.
+  The trainer's loop, tests and budget are enforced by the app as before.
 - **How the model acts:** each reply holds one action in plain text:
   `REQUEST k`, `STATS ...`, `REDO P1 P4`, a python code block, `TEST k`, or `CONFIDENT` (with an optional
   `NOTE:` line, shown to the user under "Note"). The app decides what is
@@ -241,7 +249,7 @@ checked in a browser, where the button is hidden).
   become negatives for the next gesture you train.
 
 Not yet checked, because they need a person in front of the camera or an API
-key: a full training run against Fireworks, how well the default model does,
+token: a full training run with Claude Code, how well the default model does,
 and whether 5 minutes of idle video gives enough motions. One known gap: when
 a head gesture's nose or eyes come from the pose model at runtime but came
 from the face model during training (file 02's choice), positions and head
@@ -282,7 +290,7 @@ window does.
   seconds after its last window closes, as closing the window used to.
 - **Training and windows:** one training at a time. Closing the window that
   started it, or losing its connection, cancels it.
-- **API key:** read from the `FIREWORKS_API_KEY` environment variable if set
+- **Claude Code token:** read from the `CLAUDE_CODE_OAUTH_TOKEN` environment variable if set
   (it wins over the keychain); otherwise pasted in settings, sent to the
   engine once, and stored by it in the keychain. Windows only get a masked form.
 - **Preview:** 640x480 JPEG, up to 15 a second, with the tracked points drawn

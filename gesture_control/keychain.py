@@ -1,28 +1,14 @@
-"""API keys for the model that writes gesture functions: Fireworks or Anthropic.
-Each is read from its environment variable if set, otherwise kept in the OS
-keychain. Never written to config files."""
+"""The Claude Code token that `claude setup-token` prints, for the model that
+writes gesture functions. Read from its environment variable if set, otherwise
+kept in the OS keychain. Never written to config files."""
 
 from __future__ import annotations
 
 import os
 
 SERVICE = "gesture_control"
-# provider -> (name in the keychain, environment variable, name shown to the user)
-PROVIDERS = {
-    "fireworks": ("fireworks_api_key", "FIREWORKS_API_KEY", "Fireworks"),
-    "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY", "Anthropic"),
-}
-ENV_VAR = PROVIDERS["fireworks"][1]
-ACCOUNT = PROVIDERS["fireworks"][0]
-
-
-def provider_for(writer: str) -> str:
-    """Which key a "who writes gesture functions" setting needs."""
-    return "anthropic" if writer == "claude" else "fireworks"
-
-
-def env_var(provider: str = "fireworks") -> str:
-    return PROVIDERS[provider][1]
+ACCOUNT = "claude_code_oauth_token"
+ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
 
 def _keyring():
@@ -30,36 +16,36 @@ def _keyring():
     return keyring
 
 
-def from_env(provider: str = "fireworks") -> bool:
-    return bool(os.environ.get(env_var(provider), "").strip())
+def from_env() -> bool:
+    return bool(os.environ.get(ENV_VAR, "").strip())
 
 
-def get_key(provider: str = "fireworks") -> str | None:
+def get_key() -> str | None:
     """The environment variable wins over the keychain when both are set."""
-    if from_env(provider):
-        return os.environ[env_var(provider)].strip()
+    if from_env():
+        return os.environ[ENV_VAR].strip()
     try:
-        return _keyring().get_password(SERVICE, PROVIDERS[provider][0])
+        return _keyring().get_password(SERVICE, ACCOUNT)
     except Exception:
         return None
 
 
-def has_key(provider: str = "fireworks") -> bool:
-    return bool(get_key(provider))
+def has_key() -> bool:
+    return bool(get_key())
 
 
-def set_key(value: str, provider: str = "fireworks") -> str | None:
+def set_key(value: str) -> str | None:
     """Store the key. Returns an error message, or None on success."""
     try:
-        _keyring().set_password(SERVICE, PROVIDERS[provider][0], value)
+        _keyring().set_password(SERVICE, ACCOUNT, value)
         return None
     except Exception as exc:
         return f"Could not save to the keychain: {exc}"
 
 
-def delete_key(provider: str = "fireworks") -> str | None:
+def delete_key() -> str | None:
     try:
-        _keyring().delete_password(SERVICE, PROVIDERS[provider][0])
+        _keyring().delete_password(SERVICE, ACCOUNT)
         return None
     except Exception as exc:
         return f"Could not remove from the keychain: {exc}"
